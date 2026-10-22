@@ -1,0 +1,43 @@
+# Leeds Harvester: reference analysis
+
+Reference: https://console.apify.com/store. Inspected 2026-10-22. Final requested brand is **Leeds Harvester**.
+
+## Evidence ledger
+
+| Finding | Evidence and confidence | Limits |
+| --- | --- | --- |
+| Dark console, fixed left navigation around 220 px, category navigation, search, three-column desktop Actor cards and Actor detail flow | Browser observation reported by the parent implementation agent | Sampled public Store/detail views; this does not establish every authenticated screen or mobile behavior. |
+| The public document loads `/assets/main-02KO4_iO.js` | Unauthenticated HTTP retrieval and HTML parsing | One deployment snapshot; URLs can change. |
+| Entry bundle is 1,139,003 bytes; SHA-256 `78aa66c1da844a9201d0a1586176570e9d0055f7d6061679695e1aa49c1bda97` | Direct artifact bytes; corroborated by the static inventory | Dependent chunks and source maps were not retrieved. |
+| React-family frontend with Vite/Rolldown build clues | Inert text inspection finds imports `react-amX6rbvI.js`, `rolldown-runtime-CMxvf4Kt.js`, `design-system-DXhsxUhF.js`, `router_context-CL0hlxpX.js`, and `__vite` strings | Strong implementation clues, not proof of exact package versions, source architecture, or runtime execution. |
+| AWS infrastructure, Linux/containers, MongoDB Atlas application database, DynamoDB/S3 operational storage | Official [platform architecture](https://docs.apify.com/security/architecture) | Vendor description, not independently verified infrastructure. No private backend source was recovered. |
+| API control plane separates authorization from isolated ephemeral execution | Same official architecture page | Leeds Harvester must document its own execution model; a local worker does not establish equivalent cloud isolation. |
+
+## Method and limits
+
+Only the public entry bundle was downloaded, and it was inventoried with a local static-analysis tool. The analysis ran out of memory before parsing the bundle: it recorded the file's identity, but recovered no modules, source graph or backend details. No bundle code was executed. The frontend clues above come from separately labelled text inspection, and the UI observations come from a browser session. This was not a reconstruction of the reference's source or backend.
+
+## Product flows translated into requirements
+
+| Flow | Frontend responsibility | Backend responsibility and evidence |
+| --- | --- | --- |
+| Discover an Actor | Search/filter catalog, open detail, show capabilities and input requirements | Catalog identities and actual supported operations. [Actors](https://docs.apify.com/actors) describes JSON input, execution and structured output. |
+| Configure and run | Validated input form, start action, run options, actionable errors | Validate inputs; create durable run identity; enqueue actual supported processing; preserve source URLs and status. |
+| Inspect a run | Status, log, result table, input details, abort action | Defined state transitions and cancellation. [Runs and builds](https://docs.apify.com/actors/running/runs-and-builds) documents the reference lifecycle. |
+| Retain/export results | Dataset list/detail, JSON/CSV download | Durable results associated with the run. [Dataset](https://docs.apify.com/storage/dataset) documents append-style results and export behavior. Do not invent collected records. |
+| Save a task | Save/reuse a named input configuration | Persist actor identity and exact validated inputs. [Actor tasks](https://docs.apify.com/actors/running/tasks) describes reusable configurations and visual/JSON input. |
+| Schedule execution | Create/edit/enable/disable schedule; display next execution | Durable schedule definition and live scheduler with timezone semantics. [Schedules](https://docs.apify.com/actors/running/schedules) documents cron and timezone support. Merely storing a schedule is partial implementation. |
+| Integrate | Configure events/destination and view delivery result | Bounded delivery/retry and safe destination validation. [Webhooks](https://docs.apify.com/integrations/webhooks) describes event-triggered HTTP POST. A save-only form is not webhook delivery. |
+| Account and access | Sign-up/login/logout, settings, API-key controls | Password hashing, server-owned sessions, authorization, resource ownership and revocation. Local-only operation does not remove these boundaries. |
+
+## Reconstruction boundaries
+
+The public Store is sufficient to guide the console layout and catalog-to-run journey. It does not reveal proprietary backend implementation, every commercial Actor's code, marketplace supply, managed residential proxies, payment settlement, global scheduling guarantees, or Apify's production infrastructure. The original public marketing homepage was not inspected in this research; a new Leeds Harvester landing page is a design choice.
+
+A useful standalone first implementation can provide a branded landing page, Store and detail views, login, dashboard, saved tasks, real supported scraping runs, logs/results, datasets/export, schedules and settings. Its catalog must distinguish runnable built-in tools from unavailable integrations. Lead records need source evidence. A Google Maps, LinkedIn, or other platform badge is not evidence that a corresponding connector works.
+
+Build and validate frontend navigation first, then connect each action to persistent backend behavior. Verify authentication, task persistence, a real run and export through the public local UI/API. Report remaining integrations, billing, cloud execution isolation, live webhook delivery and hosted deployment explicitly when unverified. Security review should audit this implementation; no security finding about Apify follows from this read-only reference inspection.
+
+## Later product decision (2026-10-23)
+
+The owner chose to have no sign-in. Leeds Harvester opens from the homepage straight into the Store and dashboard, and all data belongs to a single local workspace. This replaces the "Account and access" flow above. Without accounts, the access boundary is the loopback bind, the Host allowlist and the Origin check, and any user on the same machine can use the workspace. See [security model](security-model.md).

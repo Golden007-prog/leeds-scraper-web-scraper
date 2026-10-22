@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest a scraper, workflow or improvement.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Include the data you'd expect to collect, if this is a new scraper.
+  - type: checkboxes
+    id: public
+    attributes:
+      label: Data boundary
+      options:
+        - label: This only collects publicly available data and doesn't bypass logins or access controls.
+          required: true

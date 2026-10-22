@@ -1,0 +1,55 @@
+{
+  "name": "leeds-harvester",
+  "version": "0.1.0",
+  "description": "Self-hosted web scraping workspace: turn public websites into structured data with runs, tasks, cron schedules and JSON/CSV export.",
+  "keywords": [
+    "web-scraping",
+    "scraper",
+    "crawler",
+    "data-extraction",
+    "lead-generation",
+    "contact-extractor",
+    "metadata",
+    "seo",
+    "self-hosted",
+    "nodejs",
+    "react",
+    "sqlite"
+  ],
+  "homepage": "https://github.com/KritishX/Leeds-Harvester#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KritishX/Leeds-Harvester.git"
+  },
+  "bugs": {
+    "url": "https://github.com/KritishX/Leeds-Harvester/issues"
+  },
+  "author": "Kritish Dhital",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:client": "vite --host 127.0.0.1 --port 4180",
+    "dev:server": "node server/index.mjs",
+    "build": "tsc --noEmit && vite build",
+    "start": "node server/index.mjs",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.9.0",
+    "lucide-react": "^0.468.0",
+    "cheerio": "^1.1.2"
+  },
+  "devDependencies": {
+    "vite": "^7.1.0",
+    "typescript": "^5.9.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0"
+  }
+}

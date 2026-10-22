@@ -1,0 +1,35 @@
+name: Bug report
+description: Something in Leeds Harvester doesn't work as documented.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the Store and choose …
+        2. Enter the URL …
+        3. Start the run …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+  - type: input
+    id: node
+    attributes:
+      label: Node.js version and OS
+      placeholder: Node 24.18.0 on macOS 15
+  - type: textarea
+    id: logs
+    attributes:
+      label: Run logs or server output
+      render: text
