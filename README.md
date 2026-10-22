@@ -97,9 +97,9 @@ npm ci
 npm run dev
 ```
 
-Open <http://localhost:4180>. The homepage links to the Store and the dashboard.
+Open <http://leedsharvester.localhost:4180>. The homepage links to the Store and the dashboard. `localhost:4180` works too.
 
-Production mode serves the built frontend and the API from one process at <http://localhost:4181>:
+Production mode serves the built frontend and the API from one process at <http://leedsharvester.localhost:4181>:
 
 ```sh
 npm test
@@ -108,6 +108,23 @@ npm start
 ```
 
 Data is stored in `data/leeds.sqlite`. Set `LEEDS_DATA_DIR` to keep it somewhere else, and `PORT` to change the server port.
+
+### Local address
+
+Browsers send every `*.localhost` name to your own computer, so `leedsharvester.localhost` works with no setup and no domain purchase.
+
+To use another name, such as `leedsharvester.test`:
+
+1. Point it at your computer (this needs an admin password once):
+   ```sh
+   echo "127.0.0.1 leedsharvester.test" | sudo tee -a /etc/hosts
+   ```
+2. Allow it, then start the app:
+   ```sh
+   LEEDS_HOSTS=leedsharvester.test npm run dev
+   ```
+
+Prefer `.test` or `.localhost` over a real `.com`. A hosts entry for a `.com` hides the real website of that name on your computer.
 
 ## How it works
 

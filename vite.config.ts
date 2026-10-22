@@ -1,14 +1,17 @@
 import { defineConfig } from "vite";
+import { appHostnames, originsFor } from "./server/hosts.mjs";
 
-const appOrigins = ["http://localhost:4180", "http://127.0.0.1:4180"];
+const hostnames = appHostnames();
 
 export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 4180,
     strictPort: true,
+    // Same hostnames as the API server; anything else is refused.
+    allowedHosts: hostnames,
     // Only the app's own pages may make cross-origin reads from the dev server.
-    cors: { origin: appOrigins },
+    cors: { origin: originsFor(hostnames, [4180]) },
     proxy: { "/api": "http://127.0.0.1:4181" },
     fs: {
       // Vite's defaults plus the local workspace database and its backups.

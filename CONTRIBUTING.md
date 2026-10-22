@@ -9,7 +9,7 @@ git clone https://github.com/KritishX/leeds-harvester-web-scraper.git
 cd leeds-harvester-web-scraper
 nvm use          # Node 24.18.0 from .nvmrc; any Node ≥ 24.15 with node:sqlite works
 npm ci
-npm run dev      # UI at http://localhost:4180, API at http://localhost:4181
+npm run dev      # UI at http://leedsharvester.localhost:4180, API on port 4181
 ```
 
 Before opening a pull request, run:

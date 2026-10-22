@@ -290,3 +290,17 @@ test('sitemaps may be up to 10 MB while pages stay limited to 2 MB',async()=>{
   assert.equal(tooBig.status,'FAILED');assert.ok(tooBig.logs.some(l=>/exceeds 2 MB limit/.test(l)));
  }finally{await app.close();await rm(dataDirectory,{recursive:true,force:true});}
 });
+test('the app answers on leedsharvester.localhost and configured names only',async()=>{
+ const {appHostnames}=await import('../server/hosts.mjs');
+ assert.deepEqual(appHostnames({LEEDS_HOSTS:'LeedsHarvester.com, '}),['localhost','127.0.0.1','leedsharvester.localhost','leedsharvester.com']);
+ assert.throws(()=>appHostnames({LEEDS_HOSTS:'bad_host!'}),/invalid hostname/);
+ const {app,dataDirectory,base}=await start({hostnames:appHostnames({LEEDS_HOSTS:'leedsharvester.com'})});
+ const port=new URL(base).port;
+ const call=(host,origin)=>new Promise((resolve,reject)=>{const req=http.request({hostname:'127.0.0.1',port,path:'/api/settings',method:'PATCH',headers:{Host:host,Origin:origin,'Content-Type':'application/json'}},res=>{res.resume();resolve(res.statusCode);});req.on('error',reject);req.end('{"name":"Desk"}');});
+ try{
+  assert.equal(await call('leedsharvester.localhost:4180','http://leedsharvester.localhost:4180'),200);
+  assert.equal(await call('leedsharvester.com:4181','http://leedsharvester.com:4181'),200);
+  assert.equal(await call('evil.example:4180','http://evil.example:4180'),403);
+  assert.equal(await call('leedsharvester.localhost:4180','http://evil.localhost:4180'),403);
+ }finally{await app.close();await rm(dataDirectory,{recursive:true,force:true});}
+});

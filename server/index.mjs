@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildCatalog } from "./catalog.mjs";
+import { appHostnames, originsFor, APP_PORTS } from "./hosts.mjs";
 import {
   ACCEPT,
   validateUrl,
@@ -22,12 +23,7 @@ import {
   parseModelJson,
 } from "./sources.mjs";
 const now = () => new Date().toISOString();
-const origins = new Set([
-  "http://localhost:4180",
-  "http://127.0.0.1:4180",
-  "http://localhost:4181",
-  "http://127.0.0.1:4181",
-]);
+
 const MAX_RUNS = 200,
   MAX_RESOURCES = 100,
   MAX_QUEUE = 20,
@@ -125,6 +121,7 @@ export function createApplication({
   llm = null,
   timing = { politenessMs: 500, retryBaseMs: 1000 },
   maxRuns = MAX_RUNS,
+  hostnames = appHostnames(),
 } = {}) {
   const actors = buildCatalog({ llmConfigured: Boolean(llm) });
   mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
@@ -562,14 +559,11 @@ export function createApplication({
       "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
     );
     try {
+      const ports = [...new Set([...APP_PORTS, server.address()?.port || port])];
       const allowedHosts = new Set(
-        ["localhost", "127.0.0.1"].flatMap((h) => [
-          h,
-          `${h}:4180`,
-          `${h}:4181`,
-          `${h}:${server.address()?.port || port}`,
-        ]),
+        hostnames.flatMap((h) => [h, ...ports.map((p) => `${h}:${p}`)]),
       );
+      const origins = new Set(originsFor(hostnames, ports));
       if (!allowedHosts.has(req.headers.host)) reject(403, "Unrecognized Host");
       const origin = req.headers.origin;
       if (origin && !origins.has(origin)) reject(403, "Origin is not allowed");

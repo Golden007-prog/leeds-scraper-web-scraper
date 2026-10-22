@@ -5,8 +5,8 @@ Leeds Harvester is a single-workspace web data collector for one machine. It has
 ## Who can reach the workspace
 
 - The server listens only on `127.0.0.1`.
-- Requests must carry a `localhost` or `127.0.0.1` Host header on the app ports. This blocks DNS-rebinding pages that resolve their own hostname to loopback.
-- Every request that changes data (`POST`, `PATCH`, `DELETE`) needs an allowlisted Origin (`http://localhost:4180/4181` or `http://127.0.0.1:4180/4181`). Requests also need a JSON content type, and there are no state-changing `GET` routes. Together these stop other websites from acting through the browser.
+- Requests must carry an allowed Host header on the app ports: `localhost`, `127.0.0.1`, `leedsharvester.localhost`, or a name listed in `LEEDS_HOSTS`. This blocks DNS-rebinding pages that resolve their own hostname to loopback. The server and the Vite dev server share this list (`server/hosts.mjs`).
+- Every request that changes data (`POST`, `PATCH`, `DELETE`) needs an Origin of an allowed hostname on port 4180 or 4181. Requests also need a JSON content type, and there are no state-changing `GET` routes. Together these stop other websites from acting through the browser.
 - In development, Vite refuses the `data/` directories and SQLite files, and allows cross-origin reads only from the app's own origins.
 
 **Known limitation:** without sign-in, any process or OS user on the same machine can use the API, because a non-browser client can send any Origin header. The data directory is created with mode `0700`, but the API does not repeat that restriction. Run Leeds Harvester only on a machine you control. Before sharing it or exposing it on a network, add authentication and HTTPS.
