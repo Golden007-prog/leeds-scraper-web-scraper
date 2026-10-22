@@ -1,6 +1,6 @@
 {
   "name": "leeds-harvester",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Self-hosted web scraping workspace: turn public websites into structured data with runs, tasks, cron schedules and JSON/CSV export.",
   "keywords": [
     "web-scraping",
@@ -16,13 +16,13 @@
     "react",
     "sqlite"
   ],
-  "homepage": "https://github.com/KritishX/Leeds-Harvester#readme",
+  "homepage": "https://github.com/KritishX/leeds-harvester-web-scraper#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/KritishX/Leeds-Harvester.git"
+    "url": "git+https://github.com/KritishX/leeds-harvester-web-scraper.git"
   },
   "bugs": {
-    "url": "https://github.com/KritishX/Leeds-Harvester/issues"
+    "url": "https://github.com/KritishX/leeds-harvester-web-scraper/issues"
   },
   "author": "Kritish Dhital",
   "license": "MIT",

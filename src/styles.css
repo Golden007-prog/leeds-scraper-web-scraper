@@ -106,8 +106,8 @@ small {
   white-space: nowrap;
 }
 .brand img {
-  height: 35px;
-  width: 35px;
+  height: 42px;
+  width: 42px;
 }
 .brand-light {
   font-weight: 500;
@@ -118,8 +118,8 @@ small {
   gap: 8px;
 }
 .brand.small img {
-  height: 29px;
-  width: 29px;
+  height: 36px;
+  width: 36px;
 }
 .sidebar > .brand {
   padding: 0 6px;
@@ -419,7 +419,7 @@ main {
 }
 .categories {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
   margin: 37px 0 41px;
 }
@@ -2257,4 +2257,26 @@ pre {
 
 .error-text {
   color: #edbbbb;
+}
+
+.check-field {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
+}
+.check-field input {
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  flex: none;
+  accent-color: var(--lime);
+}
+.check-field span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+textarea.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
 }

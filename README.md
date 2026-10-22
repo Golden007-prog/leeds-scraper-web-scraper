@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="public/logo.svg" alt="Leeds Harvester logo" width="96" height="96">
+  <img src="public/logo.png" alt="Leeds Harvester logo" width="160" height="160">
 </p>
 
 <h1 align="center">Leeds Harvester</h1>
 
 <p align="center">
-  <strong>A self-hosted web scraping workspace.</strong><br>
-  Turn public websites into structured data: page text, links, metadata and public contact details, with runs, saved tasks, cron schedules and JSON/CSV export.
+  <strong>A self-hosted, open-source web scraping workspace.</strong><br>
+  Thirteen scrapers in one local app: page text, Markdown, contacts, local business leads, products, tables, structured data, CSS selectors, RSS/Atom feeds, sitemaps, social posts and AI extraction, with runs, saved tasks, cron schedules and JSON/JSONL/CSV export.
 </p>
 
 <p align="center">
@@ -23,10 +23,11 @@
 ## Why Leeds Harvester
 
 - **Open it and work.** No account or sign-in. The homepage leads straight to the Store and the dashboard.
-- **Runs on your machine.** A Node.js server and a SQLite file. No cloud service, no API keys.
+- **Runs on your machine.** A Node.js server and a SQLite file. No cloud service is needed, and only the AI extractor uses an API key (your own).
 - **Real extraction, with sources.** Every record keeps its source URL and collection time.
-- **Repeatable.** Save a run as a task and schedule it with interval or five-field cron (UTC) timing.
-- **Export anywhere.** Download any dataset as JSON or CSV. CSV cells are protected against spreadsheet formula injection.
+- **A polite crawler by default.** It follows `robots.txt`, waits between requests to the same site (honouring `Crawl-delay` up to 10 s), and retries throttling and temporary errors with backoff.
+- **Repeatable.** Save any scraper's input as a task and schedule it with interval or five-field cron (UTC) timing.
+- **Export anywhere.** Download any dataset as JSON, JSONL or CSV. CSV cells are protected against spreadsheet formula injection.
 
 ## Screenshots
 
@@ -34,28 +35,64 @@
 | --- | --- |
 | ![Leeds Harvester homepage](docs/screenshots/home.png) | ![Workspace dashboard with recent runs](docs/screenshots/dashboard.png) |
 
-| Run results |
-| --- |
-| ![Run detail with a collected dataset](docs/screenshots/run.png) |
+| A scraper's input form | Run results |
+| --- | --- |
+| ![Custom Selector Scraper input form](docs/screenshots/scraper.png) | ![Local business leads collected from OpenStreetMap](docs/screenshots/run.png) |
 
 ## Built-in scrapers
 
-| Scraper | Collects |
-| --- | --- |
-| **Page Text Harvester** | Clean page text for research, knowledge bases and AI workflows |
-| **Public Contact Finder** | Publicly listed email addresses, phone links and social profile links |
-| **Site Link Mapper** | Same-site link maps for discovering pages and resources |
-| **Page Metadata Reader** | Titles, meta descriptions, canonical URLs and Open Graph tags |
+| Scraper | Collects | Input |
+| --- | --- | --- |
+| **Page Text Harvester** | Clean page text | URLs |
+| **Page to Markdown** | Headings, lists, links, tables and code as Markdown, ready for LLMs | URLs |
+| **Public Contact Finder** | Emails, phone links, social profiles and contact pages, including schema.org contact data | URLs |
+| **Local Business Leads** | Businesses by type and place: name, address, phone, website, opening hours and coordinates, plus optional email lookup on their websites | Business type and city |
+| **Site Link Mapper** | Same-site link maps | URLs |
+| **Page Metadata Reader** | Title, description, canonical URL, language, robots, H1, icon, Open Graph and Twitter Card | URLs |
+| **Structured Data Reader** | JSON-LD, microdata, Open Graph and Twitter Card entities | URLs |
+| **Product Data Extractor** | Name, brand, price, currency, availability, rating, SKU/GTIN and images from shop pages that publish product data | URLs |
+| **Table Extractor** | HTML tables as rows keyed by their headers | URLs |
+| **Custom Selector Scraper** | Any fields you choose with CSS selectors, including repeating items | URLs, selectors |
+| **Feed & Sitemap Reader** | RSS, Atom and RDF items; sitemap URLs, following sitemap indexes on the same site | Feed or sitemap URLs |
+| **Social Post Reader** | Public post metadata from YouTube, TikTok, Vimeo, X, Reddit, Spotify, SoundCloud and Dailymotion through their official oEmbed endpoints | Post URLs |
+| **AI Data Extractor** | Whatever you describe in plain language, returned as JSON by your own AI model | URLs, instruction |
 
-Local Business Leads and Social Profile Research appear in the Store as provider templates. They need a data provider connection, which this release does not include, so they can't run.
+Crawl-based scrapers can follow same-site links up to 20 pages per run.
+
+Local Business Leads uses [OpenStreetMap](https://www.openstreetmap.org/copyright) data through the public Nominatim and Overpass services, with one request to each per run. Every record carries the ODbL attribution that the data's license requires.
+
+### Custom selectors
+
+Write one field per line: `name: CSS selector`. Add `@attribute` to read an attribute, and put `[]` after the name to collect every match:
+
+```text
+title: h2
+price: .price
+link: a @href
+tags[]: .tag
+```
+
+Set an **item selector** (for example `.product-card`) to get one record per repeating item.
+
+### AI extraction
+
+The AI Data Extractor works with any OpenAI-compatible chat completions endpoint: OpenAI, OpenRouter, Groq, Together, or a local server. Set these variables, then restart the server:
+
+```sh
+export LEEDS_LLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible base URL
+export LEEDS_LLM_MODEL=gpt-4o-mini
+export LEEDS_LLM_API_KEY=sk-...                       # omit for local servers without keys
+```
+
+Page content (as Markdown, up to 30,000 characters per page) is sent to that endpoint. The model is told to treat the page as untrusted data, and its reply is stored as data only; it never controls the crawler. The API key is read from the environment and is never stored with runs.
 
 ## Quick start
 
 Requires Node.js 24.15 or newer (built-in `node:sqlite`). The pinned version is in [`.nvmrc`](.nvmrc).
 
 ```sh
-git clone https://github.com/KritishX/Leeds-Harvester.git
-cd Leeds-Harvester
+git clone https://github.com/KritishX/leeds-harvester-web-scraper.git
+cd leeds-harvester-web-scraper
 npm ci
 npm run dev
 ```
@@ -77,10 +114,15 @@ Data is stored in `data/leeds.sqlite`. Set `LEEDS_DATA_DIR` to keep it somewhere
 ```text
 React 19 + Vite UI  ──/api──▶  Node.js HTTP server  ──▶  SQLite (runs, tasks, schedules)
                                      │
-                                     └──▶  Crawler: public-URL guard → pinned DNS → HTML parse (cheerio)
+                                     ├──▶  Fetch session: public-URL guard → robots.txt → per-host delay → retries
+                                     ├──▶  Extractors: HTML (cheerio), Markdown, JSON-LD/microdata, tables, selectors, XML feeds
+                                     └──▶  Sources: OpenStreetMap, oEmbed, your AI endpoint
 ```
 
-- **Runs:** at most two run at a time. Each run is limited to 20 pages, 60 seconds, 2 MB per page and 20 MB per run, with a queue of up to 20 pending runs.
+- **One catalog:** `server/catalog.mjs` declares every scraper and its input fields. The server validates input against it, and the UI builds its forms from it.
+- **Runs:** at most two run at a time, with a queue of up to 20 pending runs.
+  - Each run is limited to 20 pages, 2 MB per page (10 MB per feed or sitemap file), 20 MB of downloads, and 20 MB or 10,000 records of stored results.
+  - The deadline is 60 s per run, 120 s for local leads and 180 s for AI extraction.
 - **Cancellation and restarts:** cancelled runs keep their partial results. Runs interrupted by a restart are marked as failed instead of being left running.
 - **Schedules:** they only fire while the server is running.
 
@@ -92,25 +134,31 @@ Leeds Harvester has no sign-in, so it is designed to run on your own computer on
 
 - The server listens only on `127.0.0.1`, and it accepts only `localhost`/`127.0.0.1` Host headers, which blocks DNS-rebinding attacks.
 - Every request that changes data must come from the app's own origin, so other websites can't make changes through your browser.
-- The crawler only fetches public `http(s)` addresses on standard ports. It rejects private, loopback and reserved addresses, checks every DNS answer, connects only to the address it checked, and re-validates every redirect.
-- Scraped HTML is parsed as data and never executed.
+- Every outgoing request goes through one guard: public `http(s)` addresses on standard ports only. Private, loopback and reserved addresses are rejected, every DNS answer is checked, the connection uses the checked address, and every redirect is validated again. The only exception is your AI endpoint, which you configure yourself.
+- Scraped HTML and XML are parsed as data and never executed. Pattern matching is bounded, so a hostile page or `robots.txt` cannot freeze the server.
 
 There is no sign-in, so **any program or user on the same computer can use the workspace**. Don't expose the port to a network. Before any shared deployment, add authentication, HTTPS and backups. The full model is in [docs/security-model.md](docs/security-model.md), and the checks that were run are in [docs/validation.md](docs/validation.md).
 
+## What it deliberately does not do
+
+Leeds Harvester collects **public** data. It has no features for logging in to sites, using private or mobile APIs, bypassing bot challenges or CAPTCHAs, rotating proxies to evade blocking, extracting group members, or sending messages. [docs/capability-sources.md](docs/capability-sources.md) lists which open-source scrapers were studied, what was built independently from them, and what was declined and why.
+
 ## Limitations
 
-- It reads the HTML a server returns and doesn't run JavaScript. Pages that build their content in the browser, sites behind bot challenges, and pages that need a login may return incomplete results.
-- IPv6-only websites are not supported.
+- It reads the HTML and XML a server returns and doesn't run JavaScript. Pages that build their content in the browser, sites behind bot challenges, and pages that need a login may return incomplete results.
+- IPv6-only websites and gzip-compressed sitemaps (`.xml.gz`) are not supported. Sitemap files over 10 MB are skipped, and one sitemap file yields at most 10,000 URLs.
+- Local Business Leads depends on OpenStreetMap's free Overpass service, which is sometimes busy. Runs try a public mirror before reporting the outage.
+- Product data depends on shops publishing schema.org or Open Graph product markup. Many large marketplaces don't, or don't allow crawling.
 - Integrations are saved preferences only. No webhook or third-party delivery happens.
 - There is no billing, cloud execution, proxy pool or hosted publishing.
 
 ## Project layout
 
 ```text
-server/   HTTP API, run queue, scheduler, crawler and catalog
+server/   API, run engine, catalog, fetch session, robots.txt, extractors, sources
 src/      React application (single entry: main.tsx) and styles
-tests/    node:test suites for the API, scheduler and extractors
-docs/     API contract, security model, validation record and screenshots
+tests/    node:test suites for the API, run engine, extractors and parsers
+docs/     API contract, security model, validation record, capability sources, screenshots
 .github/  CI workflow, issue forms and pull request template
 ```
 
@@ -119,15 +167,15 @@ docs/     API contract, security model, validation record and screenshots
 Leeds Harvester is open source, and contributions are welcome: new scrapers, bug fixes, UI polish and documentation.
 
 1. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the project layout and the rules that keep the crawler safe.
-2. Find or open an [issue](https://github.com/KritishX/Leeds-Harvester/issues) describing the change.
+2. Find or open an [issue](https://github.com/KritishX/leeds-harvester-web-scraper/issues) describing the change.
 3. Fork the repository, make your change with tests, and open a pull request. CI runs `npm test` and `npm run build`.
 
 Please follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report security vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-[MIT](LICENSE) © 2026 Kritish Dhital. You're free to use, modify and distribute Leeds Harvester, including commercially. Scrape responsibly: collect only public data, and respect each site's terms and applicable law.
+[MIT](LICENSE) © 2026 Kritish Dhital. You're free to use, modify and distribute Leeds Harvester, including commercially. Scrape responsibly: collect only public data, and respect each site's terms and applicable law. OpenStreetMap data is © OpenStreetMap contributors and available under the [ODbL](https://opendatacommons.org/licenses/odbl/).
 
 ## Credits
 
-Designed and built by **Kritish Dhital**. The Leeds Harvester name and logo are original to this project. The console layout takes general inspiration from web-data marketplaces. No third-party code, assets or data are included. See [docs/reference-analysis.md](docs/reference-analysis.md) for how the reference was studied.
+Designed and built by **Kritish Dhital**. The Leeds Harvester name and logo are original to this project. Several capabilities were inspired by studying other open-source scrapers; no code was copied. See [docs/capability-sources.md](docs/capability-sources.md).

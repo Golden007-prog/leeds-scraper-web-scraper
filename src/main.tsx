@@ -45,6 +45,14 @@ import {
   Workflow,
   X,
   Zap,
+  MapPin,
+  FileCode2,
+  Braces,
+  ShoppingCart,
+  Table2,
+  MousePointerClick,
+  Rss,
+  Bot,
 } from "lucide-react";
 import "./styles.css";
 type Actor = {
@@ -53,10 +61,152 @@ type Actor = {
   slug: string;
   description: string;
   category: string;
-  icon?: string;
   color?: string;
   status: string;
+  mode?: string;
+  notice?: string | null;
+  fields: Field[];
 };
+// Input fields are declared by the server catalog; forms render from them.
+type Field = {
+  name: string;
+  type: "urls" | "number" | "boolean" | "select" | "text" | "textarea";
+  label: string;
+  required?: boolean;
+  default?: any;
+  min?: number;
+  max?: number;
+  maxLength?: number;
+  placeholder?: string;
+  help?: string;
+  options?: { value: string; label: string }[];
+};
+const splitUrls = (text: string) =>
+  text
+    .split(/\n|,/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+const initialValues = (fields: Field[]) =>
+  Object.fromEntries(
+    fields.map((f) => [
+      f.name,
+      f.type === "urls"
+        ? ""
+        : (f.default ??
+          (f.type === "boolean" ? false : f.type === "number" ? (f.min ?? 1) : "")),
+    ]),
+  );
+// Converts form values to the run input the server validates.
+function toInput(fields: Field[], values: Record<string, any>) {
+  const input: Record<string, any> = {};
+  for (const f of fields) {
+    const v = values[f.name];
+    if (f.type === "urls") input[f.name] = splitUrls(v ?? "");
+    else if (f.type === "number") input[f.name] = Number(v);
+    else if (f.type === "boolean") input[f.name] = Boolean(v);
+    else if (typeof v === "string" && v.trim()) input[f.name] = v;
+  }
+  if (input.category && input.category !== "custom") delete input.customTag;
+  return input;
+}
+function useInputValues(fields: Field[] | undefined) {
+  const [values, setValues] = useState<Record<string, any>>({});
+  useEffect(() => {
+    if (fields) setValues(initialValues(fields));
+  }, [fields]);
+  // Start URLs count toward the page limit, so it never drops below them.
+  const urlCount = splitUrls(values.urls ?? "").length;
+  useEffect(() => {
+    if (fields?.some((f) => f.name === "maxPages") && (values.maxPages ?? 1) < urlCount)
+      setValues((v) => ({ ...v, maxPages: Math.min(20, urlCount) }));
+  }, [urlCount]);
+  return [values, setValues] as const;
+}
+function InputFields({
+  fields,
+  values,
+  onChange,
+}: {
+  fields: Field[];
+  values: Record<string, any>;
+  onChange: (values: Record<string, any>) => void;
+}) {
+  const set = (name: string, value: any) => onChange({ ...values, [name]: value });
+  return (
+    <>
+      {fields.map((f) => {
+        if (f.name === "customTag" && values.category !== "custom") return null;
+        // One element, so the label's column layout keeps the asterisk inline.
+        const label = (
+          <span>
+            {f.label} {f.required && <span className="required">*</span>}
+          </span>
+        );
+        const help = f.help && <small>{f.help}</small>;
+        if (f.type === "boolean")
+          return (
+            <label className="check-field" key={f.name}>
+              <input
+                type="checkbox"
+                checked={Boolean(values[f.name])}
+                onChange={(e) => set(f.name, e.target.checked)}
+              />
+              <span>
+                {f.label}
+                {help}
+              </span>
+            </label>
+          );
+        return (
+          <label key={f.name}>
+            {label}
+            {f.type === "urls" || f.type === "textarea" ? (
+              <textarea
+                rows={f.type === "urls" ? 4 : 6}
+                className={f.name === "selectors" ? "mono" : undefined}
+                placeholder={f.placeholder}
+                maxLength={f.maxLength}
+                value={values[f.name] ?? ""}
+                onChange={(e) => set(f.name, e.target.value)}
+              />
+            ) : f.type === "select" ? (
+              <select
+                value={values[f.name] ?? ""}
+                onChange={(e) => set(f.name, e.target.value)}
+              >
+                {f.options?.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            ) : f.type === "number" ? (
+              <input
+                type="number"
+                min={
+                  f.name === "maxPages"
+                    ? Math.max(f.min ?? 1, splitUrls(values.urls ?? "").length)
+                    : f.min
+                }
+                max={f.max}
+                value={values[f.name] ?? ""}
+                onChange={(e) => set(f.name, Number(e.target.value))}
+              />
+            ) : (
+              <input
+                placeholder={f.placeholder}
+                maxLength={f.maxLength}
+                value={values[f.name] ?? ""}
+                onChange={(e) => set(f.name, e.target.value)}
+              />
+            )}
+            {help}
+          </label>
+        );
+      })}
+    </>
+  );
+}
 type Run = {
   id: string;
   actorId: string;
@@ -116,7 +266,7 @@ const nav = [
 function Brand({ small = false }: { small?: boolean }) {
   return (
     <Link to="/" className={"brand " + (small ? "small" : "")}>
-      <img src="/logo.svg" alt="" />
+      <img src="/favicon.png" alt="" />
       <span>
         Leeds<span className="brand-light"> Harvester</span>
       </span>
@@ -194,7 +344,7 @@ function App() {
             <CircleHelp size={16} /> Help & getting started
           </Link>
           <div className="sidebar-footer">
-            Leeds Harvester <span>v1.0</span>
+            Leeds Harvester <span>v0.2</span>
           </div>
         </div>
       </aside>
@@ -290,18 +440,23 @@ function App() {
     </div>
   );
 }
+const actorIcons: Record<string, any> = {
+  "website-content": FileText,
+  "page-markdown": FileCode2,
+  "contact-extractor": Mail,
+  "local-business-leads": MapPin,
+  "website-links": Link2,
+  "metadata-extractor": Code2,
+  "structured-data": Braces,
+  "product-data": ShoppingCart,
+  "table-extractor": Table2,
+  "custom-selectors": MousePointerClick,
+  "feed-reader": Rss,
+  "social-embeds": MessageSquare,
+  "ai-extract": Bot,
+};
 function ActorIcon({ actor }: { actor: Actor }) {
-  const Icon = actor.id.includes("contact")
-    ? Mail
-    : actor.id.includes("link")
-      ? Link2
-      : actor.id.includes("metadata")
-        ? Code2
-        : actor.id.includes("maps")
-          ? Globe2
-          : actor.id.includes("social")
-            ? MessageSquare
-            : FileText;
+  const Icon = actorIcons[actor.id] ?? FileText;
   return (
     <span className={"actor-icon " + (actor.color || "green")}>
       <Icon size={24} />
@@ -312,13 +467,17 @@ function StorePage({ mine = false }: { mine?: boolean }) {
   const { actors = [], error } = useCatalog();
   const [q, setQ] = useState("");
   const [category, setCategory] = useState("All");
-  const categories = [
-    ["Web scraping", Globe2, "blue"],
-    ["Lead generation", Leaf, "green"],
-    ["Social media", MessageSquare, "pink"],
-    ["SEO", ChartNoAxesCombined, "orange"],
-    ["AI & data", Sparkles, "purple"],
-  ] as const;
+  const categoryStyle: Record<string, [any, string]> = {
+    "Web scraping": [Globe2, "blue"],
+    "Lead generation": [Leaf, "green"],
+    "Social media": [MessageSquare, "pink"],
+    SEO: [ChartNoAxesCombined, "orange"],
+    "E-commerce": [ShoppingCart, "green"],
+    "AI & data": [Sparkles, "purple"],
+  };
+  const categories = [...new Set(actors.map((a) => a.category))].map(
+    (name) => [name, ...(categoryStyle[name] ?? [Box, "blue"])] as const,
+  );
   const filtered = actors.filter(
     (a) =>
       (category === "All" || a.category === category) &&
@@ -412,7 +571,7 @@ function StorePage({ mine = false }: { mine?: boolean }) {
             <p>{a.description}</p>
             <div className="card-footer">
               <span>
-                <img src="/logo.svg" alt="" /> Leeds Harvester
+                <img src="/favicon.png" alt="" /> Leeds Harvester
               </span>
               <span
                 className={
@@ -501,21 +660,13 @@ function ActorPage() {
   const { id } = useParams();
   const { actors, error: catalogError } = useCatalog();
   const actor = actors?.find((a) => a.id === id);
-  const [urls, setUrls] = useState("");
-  const [maxPages, setMaxPages] = useState(1);
+  const [values, setValues] = useInputValues(actor?.fields);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState("Input");
   const navigate = useNavigate();
-  const urlList = urls
-    .split(/\n|,/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  // Start URLs count toward the page limit, so it never drops below them.
-  useEffect(() => {
-    if (maxPages < urlList.length) setMaxPages(Math.min(20, urlList.length));
-  }, [urlList.length]);
   async function start() {
+    if (!actor) return;
     setBusy(true);
     setError("");
     try {
@@ -523,7 +674,7 @@ function ActorPage() {
         method: "POST",
         body: JSON.stringify({
           actorId: id,
-          input: { urls: urlList, maxPages },
+          input: toInput(actor.fields, values),
         }),
       });
       navigate("/runs/" + (d.run?.id || d.id));
@@ -570,13 +721,13 @@ function ActorPage() {
       <p className="detail-description">{actor.description}</p>
       <div className="detail-meta">
         <span>
-          <img src="/logo.svg" alt="" /> Leeds Harvester
+          <img src="/favicon.png" alt="" /> Leeds Harvester
         </span>
         <span>
           <ShieldCheck size={15} /> Local execution
         </span>
         <span>
-          <Database size={15} /> JSON & CSV export
+          <Database size={15} /> JSON, JSONL & CSV export
         </span>
       </div>
       <div className="tabs">
@@ -598,36 +749,18 @@ function ActorPage() {
               <span className="muted">Input</span>
             </div>
             {error && <Notice error>{error}</Notice>}
-            <label>
-              Start URLs <span className="required">*</span>
-              <textarea
-                rows={5}
-                placeholder="https://example.com"
-                value={urls}
-                onChange={(e) => setUrls(e.target.value)}
-              />
-              <small>Enter one public website URL per line.</small>
-            </label>
-            <label>
-              Maximum pages
-              <input
-                type="number"
-                min={Math.max(1, urlList.length)}
-                max="20"
-                value={maxPages}
-                onChange={(e) => setMaxPages(Number(e.target.value))}
-              />
-              <small>
-                Pages to collect, including every start URL (up to 20).
-              </small>
-            </label>
+            <InputFields
+              fields={actor.fields}
+              values={values}
+              onChange={setValues}
+            />
             <div className="form-footer">
               <span>
                 <ShieldCheck size={14} /> Public pages only
               </span>
               <button
                 className="btn primary"
-                disabled={busy || !urls.trim() || actor.status !== "ready"}
+                disabled={busy || actor.status !== "ready"}
                 onClick={start}
               >
                 <Play size={15} />
@@ -639,21 +772,16 @@ function ActorPage() {
             <span className="green-icon">
               <Zap size={21} />
             </span>
-            <h3>From URL to useful data</h3>
-            <p>1. Add your starting website URLs.</p>
-            <p>2. Set how many pages to collect.</p>
-            <p>3. Run the Actor and export your results.</p>
+            <h3>From input to useful data</h3>
+            <p>1. Fill in the input on the left.</p>
+            <p>2. Start the run and watch it collect.</p>
+            <p>3. Export your results as JSON, JSONL or CSV.</p>
             <hr />
             <p className="muted">
               Runs execute on your local server. Availability and results depend
               on the target website and its access rules.
             </p>
-            {actor.status !== "ready" && (
-              <Notice>
-                This template needs a provider integration. It cannot run in
-                this release.
-              </Notice>
-            )}
+            {actor.notice && <Notice>{actor.notice}</Notice>}
           </aside>
         </div>
       ) : tab === "About" ? (
@@ -662,13 +790,16 @@ function ActorPage() {
           <p>{actor.description}</p>
           <h3>Output</h3>
           <p>
-            Structured records with source URLs, collected locally and available
-            as JSON or CSV. Failed requests are surfaced with a reason.
+            Structured records with source URLs and collection times, available
+            as JSON, JSONL or CSV. Failed requests are logged with a reason, and
+            transient failures are retried.
           </p>
           <h3>Responsible collection</h3>
           <p>
-            Use public pages you are authorized to access. Respect website terms
-            and privacy requirements. Private network targets are blocked.
+            Use public pages you are authorized to access. Leeds Harvester
+            respects robots.txt by default, waits between requests to the same
+            site, and blocks private network targets. Respect website terms and
+            privacy law.
           </p>
         </section>
       ) : (
@@ -918,6 +1049,9 @@ function RunDetail() {
             <a className="btn" href={"/api" + path + "/export?format=json"}>
               <ArrowDownToLine size={15} /> JSON
             </a>
+            <a className="btn" href={"/api" + path + "/export?format=jsonl"}>
+              <ArrowDownToLine size={15} /> JSONL
+            </a>
           </div>
         }
       />
@@ -1043,8 +1177,9 @@ function Tasks() {
   const [error, setError] = useState("");
   const [show, setShow] = useState(false);
   const [name, setName] = useState("");
-  const [url, setUrl] = useState("");
-  const [actor, setActor] = useState("website-content");
+  const [actorId, setActorId] = useState("website-content");
+  const actor = actors?.find((a) => a.id === actorId);
+  const [values, setValues] = useInputValues(actor?.fields);
   const nav = useNavigate();
   const load = () =>
     api("/tasks")
@@ -1060,8 +1195,8 @@ function Tasks() {
         method: "POST",
         body: JSON.stringify({
           name,
-          actorId: actor,
-          input: { urls: [url], maxPages: 1 },
+          actorId,
+          input: actor ? toInput(actor.fields, values) : {},
         }),
       });
       setShow(false);
@@ -1118,7 +1253,7 @@ function Tasks() {
             </label>
             <label>
               Actor
-              <select value={actor} onChange={(e) => setActor(e.target.value)}>
+              <select value={actorId} onChange={(e) => setActorId(e.target.value)}>
                 {(actors ?? [])
                   .filter((a) => a.status === "ready")
                   .map((a) => (
@@ -1128,16 +1263,13 @@ function Tasks() {
                   ))}
               </select>
             </label>
-            <label>
-              Website URL
-              <input
-                required
-                type="url"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://example.com"
+            {actor && (
+              <InputFields
+                fields={actor.fields}
+                values={values}
+                onChange={setValues}
               />
-            </label>
+            )}
             <button className="btn primary">Save task</button>
           </form>
         </section>
@@ -1160,7 +1292,14 @@ function Tasks() {
               <FileText size={20} />
               <div>
                 <strong>{t.name}</strong>
-                <small>{t.actorId}</small>
+                <small>
+                  {actors?.find((a) => a.id === t.actorId)?.name ?? t.actorId}
+                  {t.input?.urls?.[0]
+                    ? ` · ${t.input.urls[0]}`
+                    : t.input?.place
+                      ? ` · ${t.input.place}`
+                      : ""}
+                </small>
               </div>
               <button className="btn" onClick={() => start(t)}>
                 <Play size={14} /> Run
@@ -1800,7 +1939,7 @@ function Landing() {
           </div>
           <div className="preview-body">
             <div className="preview-sidebar">
-              <img src="/logo.svg" alt="" />
+              <img src="/favicon.png" alt="" />
               {[Store, LayoutDashboard, Box, Play, Database].map((I, i) => (
                 <I key={i} size={17} />
               ))}
@@ -1882,7 +2021,7 @@ function Landing() {
         ))}
       </section>
       <section className="landing-cta">
-        <img src="/logo.svg" alt="" />
+        <img src="/favicon.png" alt="" />
         <h2>Your next opportunity is out there.</h2>
         <p>Give your research a head start.</p>
         <Link className="btn primary" to="/store">

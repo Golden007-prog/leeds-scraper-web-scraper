@@ -11,12 +11,37 @@ Leeds Harvester is a single-workspace web data collector for one machine. It has
 
 **Known limitation:** without sign-in, any process or OS user on the same machine can use the API, because a non-browser client can send any Origin header. The data directory is created with mode `0700`, but the API does not repeat that restriction. Run Leeds Harvester only on a machine you control. Before sharing it or exposing it on a network, add authentication and HTTPS.
 
-## Crawl boundary
+## Outgoing requests
 
+- Page fetches, feeds, `robots.txt`, OpenStreetMap and oEmbed requests all go through one guard, `fetchPublicResource`. The only exception is the AI endpoint, which the operator configures through environment variables.
 - URL parsing rejects embedded credentials, unsupported schemes and nonstandard ports.
 - Only public IPv4 addresses are accepted. Every DNS answer is checked, and the connection uses the address that was checked. Every redirect is parsed and validated again.
 - Each request has its own socket. Unused error and redirect bodies are discarded by closing that socket rather than being downloaded. IPv6-only sites are unsupported.
-- HTML is parsed as data and scripts are never run. Email matching uses bounded patterns, so extraction time grows linearly with page size.
+- POST requests (only the Overpass query) never follow redirects.
+- HTML and XML are parsed as data and scripts are never run. Email matching uses bounded patterns, and `robots.txt` wildcards are matched without regular expressions, so hostile input can't cause runaway matching time.
+
+## Politeness
+
+- Each run fetches `robots.txt` once per site and skips disallowed pages. Following RFC 9309:
+  - A 4xx `robots.txt`, such as a missing file, allows crawling.
+  - A server error or an unreachable `robots.txt` means the site is skipped.
+  - `robots.txt` is read whatever content type the server labels it with.
+- Redirects are followed inside the fetcher, and the page finally served is checked against its own site's rules. A disallowed redirect target is discarded.
+- Users can turn this off per run, and the UI warns them to do so only with permission.
+- Requests to the same host are at least 0.5 s apart, and longer when the site's `Crawl-delay` asks (honoured up to 10 s).
+- Throttling (408, 429) and temporary server or network errors are retried at most twice, with backoff of up to 5 s that honours `Retry-After`.
+- OpenStreetMap services get one geocoding request and one Overpass query per run, with an identifying User-Agent, in line with their usage policies.
+
+## Third parties that receive data
+
+| Destination | When | What is sent |
+| --- | --- | --- |
+| The websites you crawl | Every crawl run | HTTP requests with the Leeds Harvester User-Agent |
+| nominatim.openstreetmap.org, overpass-api.de (or the public mirror overpass.kumi.systems when the main instance fails) | Local Business Leads | The place name and the business tag |
+| oEmbed providers (YouTube, TikTok, Vimeo, X, Reddit, Spotify, SoundCloud, Dailymotion) | Social Post Reader | The post URL |
+| Your configured AI endpoint | AI Data Extractor | The instruction plus each page's Markdown (up to 30,000 characters) |
+
+The AI API key comes from the environment. It is sent only to the configured endpoint, and it is never stored in runs, logs or exports.
 
 ## Resource limits
 
@@ -25,15 +50,18 @@ Leeds Harvester is a single-workspace web data collector for one machine. It has
 | Concurrent runs | 2 |
 | Pending runs | 20 |
 | Pages per run | 20 |
-| Run deadline | 60 s |
-| HTML per page | 2 MB |
+| Run deadline | 60 s (120 s for local leads, 180 s for AI extraction) |
+| HTML per page | 2 MB (10 MB per feed or sitemap file) |
 | Downloaded HTML per run | 20 MB |
-| Stored, serialized results per run | 20 MB |
+| Stored, serialized results per run | 20 MB, and at most 10,000 records |
 | Retained runs | Newest 200 |
 | Tasks, schedules and integrations | 100 each |
 | Request body | 32 KB |
 
-Each extracted field is capped. A run that is cancelled but whose worker is still finishing is never removed by retention.
+- **Per page:** each extracted field is capped. One page yields at most 2,000 records, and one sitemap file at most 10,000.
+- **Downloads:** the download budget is checked before each page, so the page that crosses it is still kept.
+- **Retention:** a run that is cancelled but whose worker is still finishing is never removed.
+- **Bounded parsing:** Markdown conversion counts every piece of text against its cap, and microdata is read in one bounded pass. Model replies are cleaned with linear string scans. All of these stay fast on hostile pages.
 
 ## Output
 

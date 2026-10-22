@@ -8,10 +8,12 @@ import {createApplication,cronPlan} from '../server/index.mjs';
 const origin='http://127.0.0.1:4180';
 const fixture='<html><head><title>=FORMULA()</title></head><body><h1>Fixture business</h1><a href="/contact">Contact</a><a href="mailto:contact@example.com">Email</a></body></html>';
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
-const fixturePage=async url=>({html:fixture,url,bytes:fixture.length});
+const fixturePage=async url=>({body:fixture,url,bytes:fixture.length});
+// Tests skip politeness delays and use near-instant retry backoff.
+const timing={politenessMs:0,retryBaseMs:1};
 async function start(options){
  const dataDirectory=await mkdtemp(path.join(tmpdir(),'leeds-test-'));
- const app=createApplication({dataDirectory,port:0,fetchPage:fixturePage,...options});
+ const app=createApplication({dataDirectory,port:0,fetchPage:fixturePage,timing,...options});
  const {port}=await app.listen();
  return {app,dataDirectory,base:`http://127.0.0.1:${port}/api`};
 }
@@ -50,7 +52,7 @@ test('local workspace: no sign-in, real worker, cancellation, exports and durabl
   assert.equal((await request('/auth/login',{method:'POST',body:{}})).status,404);
   const input={urls:['https://example.com'],maxPages:2};
   assert.equal((await request('/runs',{method:'POST',body:{actorId:'website-content',input:{urls:['http://127.0.0.1'],maxPages:1}}})).status,400);
-  assert.equal((await request('/runs',{method:'POST',body:{actorId:'google-maps',input}})).status,409);
+  assert.equal((await request('/runs',{method:'POST',body:{actorId:'ai-extract',input:{...input,prompt:'x'}}})).status,409);
   const tooFewPages=await request('/runs',{method:'POST',body:{actorId:'website-content',input:{urls:['https://example.com','https://example.org'],maxPages:1}}});
   assert.equal(tooFewPages.status,400);assert.match(tooFewPages.data.error,/start URLs/);
   const created=await request('/runs',{method:'POST',body:{actorId:'website-content',input}});assert.equal(created.status,201,JSON.stringify(created.data));const id=created.data.run.id;
@@ -66,7 +68,7 @@ test('local workspace: no sign-in, real worker, cancellation, exports and durabl
   slow=true;const pending=(await request('/runs',{method:'POST',body:{actorId:'website-content',input}})).data.run;await until(request,pending.id,false);
   assert.equal((await request('/runs/'+pending.id+'/abort',{method:'POST',body:{}})).data.run.status,'ABORTED');assert.equal((await until(request,pending.id)).status,'ABORTED');
   await app.close();
-  app=createApplication({dataDirectory,port:0,fetchPage});base=`http://127.0.0.1:${(await app.listen()).port}/api`;request=client(base);
+  app=createApplication({dataDirectory,port:0,fetchPage,timing});base=`http://127.0.0.1:${(await app.listen()).port}/api`;request=client(base);
   assert.equal((await request('/workspace')).data.workspace.name,'Research desk');
   assert.equal((await request('/tasks')).data.tasks[0].id,task.id);assert.equal((await request('/runs/'+id)).data.run.resultCount,2);
   await request('/tasks/'+task.id,{method:'DELETE'});assert.equal((await request('/schedules')).data.schedules.length,0);
@@ -110,5 +112,181 @@ test('schedule edits replan only timing changes and can switch cron to interval'
   assert.equal(cron.cron,'0 9 * * *');assert.equal(cron.intervalMinutes,null);
   const interval=(await request('/schedules/'+created.id,{method:'PATCH',body:{intervalMinutes:5}})).data.schedule;
   assert.equal(interval.cron,null);assert.equal(interval.intervalMinutes,5);
+ }finally{await app.close();await rm(dataDirectory,{recursive:true,force:true});}
+});
+const input1={urls:['https://example.com/'],maxPages:1};
+async function finished(request,actorId,input){
+ const created=await request('/runs',{method:'POST',body:{actorId,input}});
+ assert.equal(created.status,201,JSON.stringify(created.data));
+ return until(request,created.data.run.id);
+}
+test('transient failures are retried; robots.txt disallow is honoured and explained',async()=>{
+ const calls=[];let flaky=1;
+ const {FetchError}=await import('../server/crawler.mjs');
+ const fetchPage=async(url)=>{
+  calls.push(url);
+  if(url.endsWith('/robots.txt'))return {body:'User-agent: *\nDisallow: /private',url,bytes:30};
+  if(url.endsWith('/flaky')&&flaky-->0)throw new FetchError('HTTP 503',{status:503,retryable:true});
+  if(url.endsWith('/gone'))throw new FetchError('HTTP 404',{status:404});
+  return fixturePage(url);
+ };
+ const {app,dataDirectory,base}=await start({fetchPage});const request=client(base);
+ try{
+  const flakyRun=await finished(request,'website-content',{urls:['https://example.com/flaky']});
+  assert.equal(flakyRun.status,'SUCCEEDED');assert.ok(flakyRun.logs.some(l=>/Retrying .*HTTP 503/.test(l)));
+  const gone=await finished(request,'website-content',{urls:['https://example.com/gone']});
+  assert.equal(gone.status,'FAILED');assert.equal(calls.filter(u=>u.endsWith('/gone')).length,1);
+  const blocked=await finished(request,'website-content',{urls:['https://example.com/private/page']});
+  assert.equal(blocked.status,'FAILED');assert.match(blocked.error,/robots\.txt/);assert.equal(calls.filter(u=>u.includes('/private/')).length,0);
+  const overridden=await finished(request,'website-content',{urls:['https://example.com/private/page'],respectRobots:false});
+  assert.equal(overridden.status,'SUCCEEDED');
+  // One robots.txt request per origin per run.
+  assert.equal(calls.filter(u=>u.endsWith('/robots.txt')).length,3);
+ }finally{await app.close();await rm(dataDirectory,{recursive:true,force:true});}
+});
+test('feeds, JSONL export and source actors run end to end',async()=>{
+ const feed='<rss><channel><title>N</title><item><title>A</title><link>https://example.com/a</link></item><item><title>B</title><link>https://example.com/b</link></item></channel></rss>';
+ const fetchPage=async(url,{accept}={})=>url.endsWith('/feed.xml')?{body:feed,url,bytes:feed.length}:fixturePage(url);
+ const jsonCalls=[];
+ const fetchJson=async(url,options)=>{
+  jsonCalls.push({url,method:options.method??'GET',body:options.body});
+  if(url.startsWith('https://nominatim.openstreetmap.org/'))return [{boundingbox:['53.7','53.9','-1.7','-1.4'],display_name:'Leeds, United Kingdom'}];
+  if(url==='https://overpass-api.de/api/interpreter')return {elements:[{type:'node',id:1,lat:53.8,lon:-1.55,tags:{name:'Fixture Dental','addr:housenumber':'1','addr:street':'Park Row','addr:city':'Leeds',phone:'+44 113 1',website:'example.com/dental'}},{type:'way',id:2,center:{lat:53.81,lon:-1.56},tags:{name:'Second Smile'}}]};
+  if(url.startsWith('https://www.youtube.com/oembed'))return {type:'video',title:'Fixture video',author_name:'Leeds',thumbnail_url:'https://i.example/t.jpg',thumbnail_width:480,html:'<iframe></iframe>'};
+  throw new Error('unexpected '+url);
+ };
+ const {app,dataDirectory,base}=await start({fetchPage,fetchJson});const request=client(base);
+ try{
+  const feedRun=await finished(request,'feed-reader',{urls:['https://example.com/feed.xml']});
+  assert.equal(feedRun.status,'SUCCEEDED');assert.deepEqual(feedRun.results.map(r=>r.title),['A','B']);
+  const jsonl=await request('/runs/'+feedRun.id+'/export?format=jsonl');
+  assert.equal(jsonl.status,200);assert.deepEqual(jsonl.data.split('\n').map(l=>JSON.parse(l).title),['A','B']);
+  const leads=await finished(request,'local-business-leads',{category:'dentist',place:'Leeds',limit:10,findEmails:true});
+  assert.equal(leads.status,'SUCCEEDED',leads.error);
+  assert.deepEqual(leads.results.map(r=>r.name),['Fixture Dental','Second Smile']);
+  const [dental,second]=leads.results;
+  assert.equal(dental.address,'1 Park Row, Leeds');assert.equal(dental.website,'https://example.com/dental');assert.deepEqual(dental.emails,['contact@example.com']);
+  assert.equal(dental.sourceUrl,'https://www.openstreetmap.org/node/1');assert.match(dental.attribution,/OpenStreetMap/);
+  assert.equal(second.latitude,53.81);assert.equal(second.emails,undefined);
+  const overpass=jsonCalls.find(c=>c.method==='POST');
+  assert.match(decodeURIComponent(overpass.body),/nwr\["amenity"="dentist"\]\["name"\];out center tags 10;/);
+  const tooBig=await request('/runs',{method:'POST',body:{actorId:'local-business-leads',input:{category:'custom',customTag:'shop=a"];(',place:'x'}}});
+  assert.equal(tooBig.status,400);
+  const social=await finished(request,'social-embeds',{urls:['https://www.youtube.com/watch?v=abc','https://example.com/not-supported']});
+  assert.equal(social.status,'SUCCEEDED');assert.equal(social.results.length,1);
+  assert.equal(social.results[0].provider,'YouTube');assert.equal(social.results[0].title,'Fixture video');
+  assert.ok(social.logs.some(l=>/unsupported provider/.test(l)));
+ }finally{await app.close();await rm(dataDirectory,{recursive:true,force:true});}
+});
+test('AI extraction sends page Markdown to the configured model and stores its JSON',async()=>{
+ const received=[];
+ const model=http.createServer((req,res)=>{let raw='';req.on('data',c=>raw+=c);req.on('end',()=>{
+  received.push({auth:req.headers.authorization,path:req.url,body:JSON.parse(raw)});
+  res.writeHead(200,{'Content-Type':'application/json'});
+  res.end(JSON.stringify({choices:[{message:{content:'<think>reasoning</think>```json\n{"business":"Fixture business","email":"contact@example.com"}\n```'}}]}));
+ });});
+ await new Promise(r=>model.listen(0,'127.0.0.1',r));
+ const llm={baseUrl:`http://127.0.0.1:${model.address().port}/v1`,model:'fixture-model',apiKey:'test-key'};
+ const {app,dataDirectory,base}=await start({llm});const request=client(base);
+ try{
+  assert.equal((await request('/catalog')).data.actors.find(a=>a.id==='ai-extract').status,'ready');
+  const run=await finished(request,'ai-extract',{urls:['https://example.com/'],prompt:'Business name and email'});
+  assert.equal(run.status,'SUCCEEDED',run.error);
+  assert.deepEqual(run.results[0].data,{business:'Fixture business',email:'contact@example.com'});
+  assert.equal(run.results[0].model,'fixture-model');
+  const [call]=received;
+  assert.equal(call.path,'/v1/chat/completions');assert.equal(call.auth,'Bearer test-key');assert.equal(call.body.model,'fixture-model');
+  assert.match(call.body.messages[0].content,/untrusted data/);assert.match(call.body.messages[1].content,/Business name and email/);assert.match(call.body.messages[1].content,/# Fixture business/);
+  // The key is configuration, never stored with the run.
+  assert.doesNotMatch(JSON.stringify(run),/test-key/);
+ }finally{await app.close();model.close();await rm(dataDirectory,{recursive:true,force:true});}
+});
+test('robots.txt server errors and redirects to disallowed pages are skipped',async()=>{
+ const {FetchError}=await import('../server/crawler.mjs');
+ const fetchPage=async(url)=>{
+  if(url==='https://down.example/robots.txt')throw new FetchError('HTTP 503',{status:503,retryable:true});
+  if(url.endsWith('/robots.txt'))return {body:'User-agent: *\nDisallow: /private',url,bytes:30};
+  // An allowed URL that redirects into a disallowed path.
+  if(url==='https://example.com/go')return {body:fixture,url:'https://example.com/private/landing',bytes:fixture.length};
+  return fixturePage(url);
+ };
+ const {app,dataDirectory,base}=await start({fetchPage});const request=client(base);
+ try{
+  const down=await finished(request,'website-content',{urls:['https://down.example/page']});
+  assert.equal(down.status,'FAILED');assert.ok(down.logs.some(l=>/could not be read/.test(l)));
+  const redirected=await finished(request,'website-content',{urls:['https://example.com/go']});
+  assert.equal(redirected.status,'FAILED');assert.equal(redirected.resultCount,0);
+  assert.ok(redirected.logs.some(l=>/Skipped https:\/\/example.com\/go: disallowed by robots.txt/.test(l)));
+ }finally{await app.close();await rm(dataDirectory,{recursive:true,force:true});}
+});
+test('sitemap indexes are followed within the file limit',async()=>{
+ const index='<sitemapindex><sitemap><loc>https://example.com/s1.xml</loc></sitemap><sitemap><loc>https://other.example/s2.xml</loc></sitemap></sitemapindex>';
+ const child='<urlset><url><loc>https://example.com/a</loc></url><url><loc>https://example.com/b</loc></url></urlset>';
+ const fetchPage=async(url)=>url.endsWith('/sitemap.xml')?{body:index,url,bytes:index.length}:url.endsWith('/s1.xml')?{body:child,url,bytes:child.length}:fixturePage(url);
+ const {app,dataDirectory,base}=await start({fetchPage});const request=client(base);
+ try{
+  const shallow=await finished(request,'feed-reader',{urls:['https://example.com/sitemap.xml']});
+  assert.deepEqual(shallow.results.map(r=>r.kind),['sitemap','sitemap']);
+  const deep=await finished(request,'feed-reader',{urls:['https://example.com/sitemap.xml'],maxPages:3});
+  // The same-site child sitemap is read; the other site's is not.
+  assert.deepEqual(deep.results.filter(r=>r.kind==='sitemap-url').map(r=>r.loc),['https://example.com/a','https://example.com/b']);
+ }finally{await app.close();await rm(dataDirectory,{recursive:true,force:true});}
+});
+test('the page that crosses the download budget keeps its records',async()=>{
+ const big='<html><head><title>Big</title></head><body>'+Array.from({length:20},(_,i)=>`<a href="/p${i}">p</a>`).join('')+'x'.repeat(1900000)+'</body></html>';
+ const fetchPage=async(url)=>({body:big,url,bytes:big.length});
+ const {app,dataDirectory,base}=await start({fetchPage});const request=client(base);
+ try{
+  const run=await finished(request,'website-content',{urls:['https://example.com/'],maxPages:20});
+  // 12 pages of ~1.9 MB cross the 20 MiB budget; the 12th page's record is kept (it was dropped before).
+  assert.equal(run.status,'SUCCEEDED');assert.equal(run.resultCount,12);
+  assert.ok(run.logs.some(l=>/20 MB download limit/.test(l)));
+ }finally{await app.close();await rm(dataDirectory,{recursive:true,force:true});}
+});
+test('local leads are kept when a run is cancelled during website lookups',async()=>{
+ const fetchJson=async(url)=>url.includes('nominatim')?[{boundingbox:['53.7','53.9','-1.7','-1.4'],display_name:'Leeds'}]:{elements:[{type:'node',id:1,lat:1,lon:2,tags:{name:'A',website:'https://a.example/'}},{type:'node',id:2,lat:1,lon:2,tags:{name:'B'}}]};
+ // Website lookups hang until the run is aborted.
+ const fetchPage=(url,{signal})=>new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));
+ const {app,dataDirectory,base}=await start({fetchPage,fetchJson});const request=client(base);
+ try{
+  const created=(await request('/runs',{method:'POST',body:{actorId:'local-business-leads',input:{category:'cafe',place:'Leeds',findEmails:true}}})).data.run;
+  for(let i=0;i<100&&(await request('/runs/'+created.id)).data.run.resultCount<2;i++)await delay(10);
+  await request('/runs/'+created.id+'/abort',{method:'POST',body:{}});
+  const run=await until(request,created.id);
+  assert.equal(run.status,'ABORTED');assert.deepEqual(run.results.map(r=>r.name),['A','B']);
+ }finally{await app.close();await rm(dataDirectory,{recursive:true,force:true});}
+});
+test('a busy Overpass instance falls back to the mirror, then fails with a clear message',async()=>{
+ const {FetchError}=await import('../server/crawler.mjs');
+ let mirrorDown=false;const asked=[];
+ const fetchJson=async(url)=>{
+  asked.push(new URL(url).host);
+  if(url.includes('nominatim'))return [{boundingbox:['53.7','53.9','-1.7','-1.4'],display_name:'Leeds'}];
+  if(url.startsWith('https://overpass-api.de/'))throw new FetchError('HTTP 502',{status:502,retryable:true});
+  if(mirrorDown)throw new FetchError('Request timed out',{retryable:true});
+  return {elements:[{type:'node',id:7,lat:1,lon:2,tags:{name:'Mirror Cafe'}}]};
+ };
+ const {app,dataDirectory,base}=await start({fetchJson});const request=client(base);
+ try{
+  const ok=await finished(request,'local-business-leads',{category:'cafe',place:'Leeds'});
+  assert.equal(ok.status,'SUCCEEDED');assert.deepEqual(ok.results.map(r=>r.name),['Mirror Cafe']);
+  assert.ok(ok.logs.some(l=>/overpass-api\.de failed \(HTTP 502\); trying a mirror/.test(l)));
+  mirrorDown=true;
+  const down=await finished(request,'local-business-leads',{category:'cafe',place:'Leeds'});
+  assert.equal(down.status,'FAILED');assert.match(down.error,/Overpass service is busy or unavailable/);
+ }finally{await app.close();await rm(dataDirectory,{recursive:true,force:true});}
+});
+test('sitemaps may be up to 10 MB while pages stay limited to 2 MB',async()=>{
+ const entries=Array.from({length:12000},(_,i)=>`<url><loc>https://example.com/page/${i}/${'x'.repeat(200)}</loc></url>`).join('');
+ const sitemap=`<urlset>${entries}</urlset>`;
+ const page='<html><body>'+'y'.repeat(3*1024*1024)+'</body></html>';
+ const fetchPage=async(url)=>url.endsWith('.xml')?{body:sitemap,url,bytes:sitemap.length}:{body:page,url,bytes:page.length};
+ const {app,dataDirectory,base}=await start({fetchPage});const request=client(base);
+ try{
+  assert.ok(sitemap.length>2*1024*1024);
+  const read=await finished(request,'feed-reader',{urls:['https://example.com/sitemap.xml']});
+  assert.equal(read.status,'SUCCEEDED');assert.equal(read.resultCount,10000);
+  const tooBig=await finished(request,'website-content',{urls:['https://example.com/']});
+  assert.equal(tooBig.status,'FAILED');assert.ok(tooBig.logs.some(l=>/exceeds 2 MB limit/.test(l)));
  }finally{await app.close();await rm(dataDirectory,{recursive:true,force:true});}
 });

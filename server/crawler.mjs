@@ -2,7 +2,6 @@ import { lookup } from "node:dns/promises";
 import http from "node:http";
 import https from "node:https";
 import { isIP } from "node:net";
-import * as cheerio from "cheerio";
 
 export function isPublicIPv4(address) {
   if (isIP(address) !== 4) return false;
@@ -55,79 +54,184 @@ export async function publicAddress(u) {
     throw new Error("Target resolves to a private or reserved network address");
   return answers[0].address;
 }
-export async function fetchPublicPage(
+export const USER_AGENT =
+  "LeedsHarvester/0.2 (+https://github.com/KritishX/leeds-harvester-web-scraper)";
+// What each kind of request accepts; a response of another type is refused
+// before its body is read.
+export const ACCEPT = {
+  html: {
+    header: "text/html,application/xhtml+xml",
+    type: /text\/html|application\/xhtml\+xml/i,
+    label: "an HTML page",
+  },
+  feed: {
+    header:
+      "application/rss+xml,application/atom+xml,application/xml;q=0.9,text/xml;q=0.9",
+    type: /xml/i,
+    label: "an XML feed or sitemap",
+  },
+  text: { header: "text/plain", type: /^text\//i, label: "a text file" },
+  json: { header: "application/json", type: /json/i, label: "a JSON response" },
+  // robots.txt is read whatever Content-Type the server labels it with.
+  any: { header: "text/plain,*/*;q=0.5", type: /(?:)/, label: "a file" },
+};
+const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+const RETRYABLE_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EPIPE",
+  "EAI_AGAIN",
+]);
+// A failed request says whether trying again could help, so callers retry
+// throttling and transient faults but never a refused or oversized response.
+export class FetchError extends Error {
+  constructor(message, { status = null, retryable = false, retryAfterMs = null } = {}) {
+    super(message);
+    this.name = "FetchError";
+    this.status = status;
+    this.retryable = retryable;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+function retryAfter(value) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : null;
+}
+// The charset comes from the Content-Type header, else from a <meta> tag or the
+// XML declaration within the first 1 KB, else UTF-8.
+export function decodeBody(buffer, contentType) {
+  const head = buffer.subarray(0, 1024).toString("latin1");
+  const charset =
+    /charset=["']?([\w-]+)/i.exec(contentType || "")?.[1] ??
+    /<meta[^>]{0,200}?charset=["']?([\w-]+)/i.exec(head)?.[1] ??
+    /<\?xml[^>]{0,200}?encoding=["']([\w-]+)/i.exec(head)?.[1];
+  try {
+    return new TextDecoder(charset || "utf-8").decode(buffer);
+  } catch {
+    return new TextDecoder("utf-8").decode(buffer);
+  }
+}
+const sizeLabel = (bytes) =>
+  bytes >= 1024 * 1024
+    ? `${Math.round(bytes / 1024 / 1024)} MB`
+    : `${Math.round(bytes / 1024)} KB`;
+// Fetches one public resource. Every hop (including redirects) is validated,
+// resolved to public IPv4 addresses only, and pinned to the checked address.
+export async function fetchPublicResource(
   value,
-  { signal, maxBytes = 2 * 1024 * 1024 } = {},
+  {
+    signal,
+    maxBytes = 2 * 1024 * 1024,
+    accept = ACCEPT.html,
+    method = "GET",
+    headers = {},
+    body,
+    timeoutMs = 15000,
+  } = {},
 ) {
   let u = validateUrl(value);
   for (let redirects = 0; redirects <= 5; redirects++) {
     const address = await publicAddress(u);
     const response = await new Promise((resolve, reject) => {
-      const request = (u.protocol === "https:" ? https : http).get(
+      const request = (u.protocol === "https:" ? https : http).request(
         u,
         {
+          method,
           signal,
           // One socket per request: no pooled socket outlives a rejected response.
           agent: false,
-          timeout: 15000,
+          timeout: timeoutMs,
           lookup: (_host, opts, cb) =>
             cb(null, opts?.all ? [{ address, family: 4 }] : address, 4),
           headers: {
-            "User-Agent": "LeedsHarvester/0.1 (+local public-page collector)",
-            Accept: "text/html,application/xhtml+xml",
+            "User-Agent": USER_AGENT,
+            Accept: accept.header,
+            ...headers,
+            ...(body === undefined
+              ? {}
+              : { "Content-Length": Buffer.byteLength(body) }),
           },
         },
         (res) => {
           // Unused bodies are discarded by closing the socket, never drained.
-          const discard = (error, value) => {
+          const discard = (error, result) => {
             res.destroy();
             if (error) reject(error);
-            else resolve(value);
+            else resolve(result);
           };
-          if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
-            if (!res.headers.location)
-              discard(new Error("Redirect is missing a Location header"));
+          const status = res.statusCode;
+          if ([301, 302, 303, 307, 308].includes(status)) {
+            if (method !== "GET")
+              discard(new FetchError(`Unexpected redirect (HTTP ${status})`));
+            else if (!res.headers.location)
+              discard(new FetchError("Redirect is missing a Location header"));
             else discard(null, { redirect: res.headers.location });
             return;
           }
-          if (res.statusCode < 200 || res.statusCode >= 300) {
-            discard(new Error(`HTTP ${res.statusCode}`));
+          if (status < 200 || status >= 300) {
+            discard(
+              new FetchError(`HTTP ${status}`, {
+                status,
+                retryable: RETRYABLE_STATUS.has(status),
+                retryAfterMs: retryAfter(res.headers["retry-after"]),
+              }),
+            );
             return;
           }
-          if (
-            !/text\/html|application\/xhtml\+xml/i.test(
-              res.headers["content-type"] || "",
-            )
-          ) {
-            discard(new Error("Target is not an HTML page"));
+          const contentType = res.headers["content-type"] || "";
+          if (!accept.type.test(contentType)) {
+            discard(new FetchError(`Target is not ${accept.label}`));
+            return;
+          }
+          if (Number(res.headers["content-length"]) > maxBytes) {
+            discard(new FetchError(`Response exceeds ${sizeLabel(maxBytes)} limit`));
             return;
           }
           let size = 0;
           const chunks = [];
           res.on("data", (chunk) => {
             size += chunk.length;
-            if (size > maxBytes) {
-              res.destroy(new Error("Page exceeds 2 MB limit"));
-            } else chunks.push(chunk);
+            if (size > maxBytes)
+              res.destroy(
+                new FetchError(`Response exceeds ${sizeLabel(maxBytes)} limit`),
+              );
+            else chunks.push(chunk);
           });
           res.on("error", reject);
           res.on("close", () => {
             if (!res.complete)
-              reject(new Error("Connection closed before the page completed"));
+              reject(
+                new FetchError("Connection closed before the response completed", {
+                  retryable: true,
+                }),
+              );
           });
           res.on("end", () =>
             resolve({
-              html: Buffer.concat(chunks).toString("utf8"),
+              body: decodeBody(Buffer.concat(chunks), contentType),
               url: u.href,
               bytes: size,
+              contentType,
+              status,
             }),
           );
         },
       );
       request.on("timeout", () =>
-        request.destroy(new Error("Page request timed out")),
+        request.destroy(new FetchError("Request timed out", { retryable: true })),
       );
-      request.on("error", reject);
+      request.on("error", (e) =>
+        reject(
+          RETRYABLE_CODES.has(e.code)
+            ? new FetchError(e.message, { retryable: true })
+            : e,
+        ),
+      );
+      request.end(body);
     });
     if (response.redirect) {
       u = validateUrl(new URL(response.redirect, u).href);
@@ -135,89 +239,17 @@ export async function fetchPublicPage(
     }
     return response;
   }
-  throw new Error("Redirect limit exceeded");
+  throw new FetchError("Redirect limit exceeded");
 }
-// Bounded quantifiers keep matching linear; an unbounded `+@` scan is quadratic
-// on long runs of address characters.
-const EMAIL =
-  /[A-Z0-9._%+-]{1,64}@[A-Z0-9-]{1,63}(?:\.[A-Z0-9-]{1,63}){0,8}\.[A-Z]{2,24}/gi;
-// Every extracted string is capped so stored results stay proportional to the page.
-const clip = (value, max = 2048) =>
-  typeof value === "string" ? value.trim().slice(0, max) : null;
-export function extractPage(html, url, actorId) {
-  const $ = cheerio.load(html);
-  $("script,style,noscript,iframe,template").remove();
-  const title = clip($("title").first().text(), 1000) ?? "";
-  const links = [
-    ...new Set(
-      $("a[href]")
-        .map((_, a) => {
-          try {
-            const u = new URL($(a).attr("href"), url);
-            u.hash = "";
-            return ["http:", "https:"].includes(u.protocol) &&
-              u.href.length <= 2048
-              ? u.href
-              : null;
-          } catch {
-            return null;
-          }
-        })
-        .get()
-        .filter(Boolean),
-    ),
-  ].slice(0, 500);
-  const base = { sourceUrl: url, title, collectedAt: new Date().toISOString() };
-  let record;
-  if (actorId === "contact-extractor") {
-    const text = $("body").text();
-    const mailto = $('a[href^="mailto:"]')
-      .map((_, a) => clip($(a).attr("href").slice(7).split("?")[0], 254))
-      .get()
-      .filter(Boolean);
-    record = {
-      ...base,
-      emails: [
-        ...new Set([
-          ...mailto,
-          ...(text.match(EMAIL) || []),
-        ]),
-      ].slice(0, 100),
-      phones: [
-        ...new Set(
-          $('a[href^="tel:"]')
-            .map((_, a) => clip($(a).attr("href").slice(4), 64))
-            .get()
-            .filter(Boolean),
-        ),
-      ].slice(0, 100),
-      socialLinks: links
-        .filter((v) =>
-          /https?:\/\/(www\.)?(linkedin\.com|facebook\.com|instagram\.com|x\.com|twitter\.com)\//i.test(
-            v,
-          ),
-        )
-        .slice(0, 100),
-    };
-  } else if (actorId === "website-links") record = { ...base, links };
-  else if (actorId === "metadata-extractor")
-    record = {
-      ...base,
-      description: clip($('meta[name="description"]').attr("content")) || null,
-      canonical: clip($('link[rel="canonical"]').attr("href")) || null,
-      openGraph: Object.fromEntries(
-        $('meta[property^="og:"]')
-          .slice(0, 50)
-          .map((_, m) => [
-            [clip($(m).attr("property"), 100), clip($(m).attr("content")) ?? ""],
-          ])
-          .get(),
-      ),
-    };
-  else
-    record = {
-      ...base,
-      text: $("body").text().replace(/\s+/g, " ").trim().slice(0, 100000),
-    };
-  return { record, links };
+export async function fetchPublicJson(url, options = {}) {
+  const response = await fetchPublicResource(url, {
+    maxBytes: 5 * 1024 * 1024,
+    ...options,
+    accept: ACCEPT.json,
+  });
+  try {
+    return JSON.parse(response.body);
+  } catch {
+    throw new FetchError("Response is not valid JSON");
+  }
 }

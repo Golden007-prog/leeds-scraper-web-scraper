@@ -6,7 +6,7 @@ Security fixes go to the latest release on `main`.
 
 ## Reporting a vulnerability
 
-Please **do not open a public issue**. Report it privately through [GitHub private vulnerability reporting](https://github.com/KritishX/Leeds-Harvester/security/advisories/new), and include:
+Please **do not open a public issue**. Report it privately through [GitHub private vulnerability reporting](https://github.com/KritishX/leeds-harvester-web-scraper/security/advisories/new), and include:
 
 - the affected file or endpoint and the version or commit;
 - the steps or input that reproduce it on a local install;

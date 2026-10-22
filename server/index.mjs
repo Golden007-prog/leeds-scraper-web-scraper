@@ -4,8 +4,23 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { actors } from "./catalog.mjs";
-import { validateUrl, fetchPublicPage, extractPage } from "./crawler.mjs";
+import { buildCatalog } from "./catalog.mjs";
+import {
+  ACCEPT,
+  validateUrl,
+  fetchPublicResource,
+  fetchPublicJson,
+} from "./crawler.mjs";
+import { extractHtml, extractFeed, pageMarkdown } from "./extractors.mjs";
+import { normalizeInput, InputError } from "./input.mjs";
+import { createFetchSession, RobotsBlocked } from "./session.mjs";
+import {
+  runLocalBusinessLeads,
+  runSocialEmbeds,
+  readLlmConfig,
+  askModel,
+  parseModelJson,
+} from "./sources.mjs";
 const now = () => new Date().toISOString();
 const origins = new Set([
   "http://localhost:4180",
@@ -17,7 +32,9 @@ const MAX_RUNS = 200,
   MAX_RESOURCES = 100,
   MAX_QUEUE = 20,
   PAGE_BYTES = 2 * 1024 * 1024,
-  RUN_BYTES = 20 * 1024 * 1024;
+  RUN_BYTES = 20 * 1024 * 1024,
+  MAX_RECORDS = 10000,
+  AI_PAGE_CHARS = 30000;
 class HttpError extends Error {
   constructor(status, message) {
     super(message);
@@ -32,29 +49,6 @@ const text = (v, name, max = 120) => {
     reject(400, `${name} is required (maximum ${max} characters)`);
   return v.trim();
 };
-function inputValue(input) {
-  if (
-    !input ||
-    typeof input !== "object" ||
-    !Array.isArray(input.urls) ||
-    !input.urls.length ||
-    input.urls.length > 20
-  )
-    reject(400, "Provide 1–20 public website URLs");
-  let urls;
-  try {
-    urls = [...new Set(input.urls.map((v) => validateUrl(v).href))];
-  } catch (e) {
-    reject(400, e.message);
-  }
-  // Start URLs count toward the page limit, so the limit must cover them all.
-  const maxPages = input.maxPages ?? urls.length;
-  if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 20)
-    reject(400, "Maximum pages must be an integer from 1 to 20");
-  if (maxPages < urls.length)
-    reject(400, "Maximum pages must be at least the number of start URLs");
-  return { urls, maxPages };
-}
 export function cronPlan(cron, intervalMinutes) {
   if (cron !== undefined) {
     const value = text(cron, "Cron expression", 80);
@@ -126,9 +120,13 @@ export function cronPlan(cron, intervalMinutes) {
 export function createApplication({
   dataDirectory = path.resolve("data"),
   port = 4181,
-  fetchPage = fetchPublicPage,
+  fetchPage = fetchPublicResource,
+  fetchJson = fetchPublicJson,
+  llm = null,
+  timing = { politenessMs: 500, retryBaseMs: 1000 },
   maxRuns = MAX_RUNS,
 } = {}) {
+  const actors = buildCatalog({ llmConfigured: Boolean(llm) });
   mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(path.join(dataDirectory, "leeds.sqlite"));
   db.exec(
@@ -208,8 +206,16 @@ export function createApplication({
     const actor = actors.find((a) => a.id === id);
     if (!actor) reject(400, "Unknown Actor");
     if (actor.status !== "ready")
-      reject(409, "This Actor requires a provider and cannot run");
+      reject(409, actor.notice || "This Actor requires a provider and cannot run");
     return actor;
+  };
+  const validInput = (actor, input) => {
+    try {
+      return normalizeInput(actor, input);
+    } catch (e) {
+      if (e instanceof InputError) reject(400, e.message);
+      throw e;
+    }
   };
   function prune() {
     const runs = runSummaries();
@@ -229,7 +235,7 @@ export function createApplication({
   }
   function enqueue(actorId, input) {
     const actor = actorFor(actorId);
-    const normalized = inputValue(input);
+    const normalized = validInput(actor, input);
     if (closing) reject(503, "Server is shutting down");
     if (queue.length >= MAX_QUEUE)
       reject(429, `Run queue is full (${MAX_QUEUE} pending runs maximum)`);
@@ -268,62 +274,77 @@ export function createApplication({
         });
     }
   }
-  async function execute(id, controller) {
-    const run = find(id, "run");
-    run.status = "RUNNING";
-    run.startedAt = now();
-    log(run, "Collection started");
-    save("run", run);
-    const timeout = setTimeout(
-      () => controller.abort(new Error("Run exceeded 60-second deadline")),
-      60000,
-    );
-    timeout.unref();
-    try {
-      const pending = [...run.input.urls],
-        seen = new Set();
-      // Downloaded HTML and stored (serialized) results have separate budgets;
-      // reaching either one ends the run with the results collected so far.
-      let bytes = 0,
-        stored = 0,
-        failures = 0,
-        budget = null;
-      while (!budget && pending.length && seen.size < run.input.maxPages) {
-        if (controller.signal.aborted) throw controller.signal.reason;
-        const url = pending.shift();
-        if (seen.has(url)) continue;
-        seen.add(url);
-        try {
-          const page = await fetchPage(url, {
-            signal: controller.signal,
-            maxBytes: Math.min(PAGE_BYTES, RUN_BYTES - bytes),
+  // Collects a crawl run: pages from the start URLs and, when the actor follows
+  // links and the page limit allows, same-site links found on those pages.
+  async function crawl(run, actor, ctx) {
+    const { signal, get, push, log, budget } = ctx;
+    const pending = [...run.input.urls],
+      seen = new Set();
+    let failures = 0,
+      skipped = 0;
+    const limit = run.input.maxPages ?? run.input.urls.length;
+    const pageLimit = actor.maxBytes ?? PAGE_BYTES;
+    // The download budget is checked before each page, so the page that crosses
+    // it is still extracted and kept.
+    while (!budget.stop && budget.bytes < RUN_BYTES && pending.length && seen.size < limit) {
+      if (signal.aborted) throw signal.reason;
+      const url = pending.shift();
+      if (seen.has(url)) continue;
+      seen.add(url);
+      try {
+        const page = await get(url, {
+          accept: ACCEPT[actor.accept ?? "html"],
+          maxBytes: pageLimit,
+        });
+        if (signal.aborted) throw signal.reason;
+        if (!page || typeof page.body !== "string" || typeof page.url !== "string")
+          throw new Error("Collector returned an invalid page");
+        const pageBytes = page.bytes ?? Buffer.byteLength(page.body);
+        if (pageBytes > pageLimit)
+          throw new Error(`Page exceeds ${pageLimit / 1024 / 1024} MB limit`);
+        budget.bytes += pageBytes;
+        let result;
+        if (actor.accept === "feed") result = extractFeed(page.body, page.url);
+        else if (actor.id === "ai-extract") {
+          const { title, markdown, links } = pageMarkdown(page.body, page.url, AI_PAGE_CHARS);
+          const reply = await askModel(llm, {
+            instruction: run.input.prompt,
+            url: page.url,
+            title,
+            markdown,
+            signal,
           });
-          if (controller.signal.aborted) throw controller.signal.reason;
-          if (
-            !page ||
-            typeof page.html !== "string" ||
-            typeof page.url !== "string"
-          )
-            throw new Error("Collector returned an invalid page");
-          const pageBytes = Buffer.byteLength(page.html);
-          if (pageBytes > PAGE_BYTES) throw new Error("Page exceeds 2 MB limit");
-          bytes += pageBytes;
-          if (bytes >= RUN_BYTES) budget = "download";
-          const { record, links } = extractPage(
-            page.html,
-            page.url,
-            run.actorId,
-          );
-          stored += Buffer.byteLength(JSON.stringify(record));
-          if (stored > RUN_BYTES) {
-            budget = "stored result";
-            break;
+          let data = null,
+            parseError = null;
+          try {
+            data = parseModelJson(reply);
+          } catch (e) {
+            parseError = e.message;
           }
-          run.results.push(record);
-          run.resultCount = run.results.length;
-          log(run, `Collected ${page.url}`);
+          result = {
+            records: [
+              {
+                sourceUrl: page.url,
+                title,
+                collectedAt: now(),
+                model: llm.model,
+                contentTruncated: markdown.length >= AI_PAGE_CHARS,
+                data,
+                ...(parseError ? { parseError, rawReply: reply.slice(0, 4000) } : {}),
+              },
+            ],
+            links,
+          };
+        } else result = extractHtml(actor.id, page.body, page.url, run.input);
+        let added = 0;
+        for (const record of result.records) {
+          if (!push(record)) break;
+          added++;
+        }
+        log(`Collected ${page.url} (${added} record${added === 1 ? "" : "s"})`);
+        if (limit > run.input.urls.length) {
           const origin = new URL(page.url).origin;
-          for (const link of links) {
+          for (const link of result.links) {
             if (pending.length >= 100) break;
             try {
               const target = validateUrl(link);
@@ -337,18 +358,103 @@ export function createApplication({
               /* Unsafe links are never scheduled. */
             }
           }
-        } catch (e) {
-          if (controller.signal.aborted) throw controller.signal.reason;
-          failures++;
-          log(run, `Failed ${url}: ${String(e.message).slice(0, 200)}`);
         }
-        save("run", run);
+      } catch (e) {
+        if (signal.aborted) throw signal.reason;
+        if (e instanceof RobotsBlocked) {
+          skipped++;
+          log(`Skipped ${url}: ${e.reason}`);
+        } else {
+          failures++;
+          log(`Failed ${url}: ${String(e.message).slice(0, 200)}`);
+        }
       }
-      if (budget)
-        log(run, `Stopped at the 20 MB ${budget} limit; results kept`);
+      save("run", run);
+    }
+    if (budget.bytes >= RUN_BYTES)
+      log("Stopped at the 20 MB download limit; results kept");
+    if (skipped && !run.results.length && !failures)
+      throw new Error(
+        "Every requested page was skipped because of the site's robots.txt. Turn off “Respect robots.txt” only if you have permission.",
+      );
+    return { failures };
+  }
+  const sourceRunners = {
+    "local-business-leads": runLocalBusinessLeads,
+    "social-embeds": runSocialEmbeds,
+  };
+  async function execute(id, controller) {
+    const run = find(id, "run");
+    const actor = actors.find((a) => a.id === run.actorId);
+    run.status = "RUNNING";
+    run.startedAt = now();
+    log(run, "Collection started");
+    save("run", run);
+    const deadlineMs = actor?.deadlineMs ?? 60000;
+    const started = Date.now();
+    const timeout = setTimeout(
+      () =>
+        controller.abort(
+          new Error(`Run exceeded ${Math.round(deadlineMs / 1000)}-second deadline`),
+        ),
+      deadlineMs,
+    );
+    timeout.unref();
+    // Downloaded HTML and stored (serialized) results have separate budgets;
+    // reaching either one ends the run with the results collected so far.
+    // `stop` records which result limit ended collection; downloads are bounded
+    // separately in the crawl loop.
+    const budget = { bytes: 0, stored: 0, stop: null };
+    const push = (record) => {
+      if (budget.stop) return false;
+      const size = Buffer.byteLength(JSON.stringify(record));
+      if (budget.stored + size > RUN_BYTES) budget.stop = "stored result";
+      else if (run.results.length >= MAX_RECORDS) budget.stop = "record";
+      if (budget.stop) return false;
+      budget.stored += size;
+      run.results.push(record);
+      run.resultCount = run.results.length;
+      return true;
+    };
+    try {
+      if (!actor) throw new Error("This Actor is no longer available");
+      const signal = controller.signal;
+      // A fetch session for the run's signal, or for a shorter-lived signal
+      // when a source bounds part of its work (e.g. website lookups).
+      const session = (sessionSignal) => {
+        const get = createFetchSession({
+          fetchPage,
+          signal: sessionSignal,
+          respectRobots: run.input.respectRobots !== false,
+          politenessMs: timing.politenessMs,
+          retryBaseMs: timing.retryBaseMs,
+          log: (message) => log(run, message),
+        });
+        return (url, options = {}) => get(url, { maxBytes: PAGE_BYTES, ...options });
+      };
+      const ctx = {
+        input: run.input,
+        signal,
+        budget,
+        push,
+        session,
+        get: session(signal),
+        // Persists progress so collected records are visible while a source
+        // is still working.
+        checkpoint: () => save("run", run),
+        log: (message) => log(run, message),
+        timeLeft: () => deadlineMs - (Date.now() - started),
+        fetchJson: (url, options = {}) => fetchJson(url, { ...options, signal }),
+      };
+      const { failures = 0 } =
+        actor.mode === "source"
+          ? await sourceRunners[actor.id](ctx)
+          : await crawl(run, actor, ctx);
+      if (budget.stop)
+        log(run, `Stopped at the ${budget.stop} limit; results kept`);
       run.status = failures ? "FAILED" : "SUCCEEDED";
       if (failures)
-        run.error = `${failures} page request(s) failed; partial results retained`;
+        run.error = `${failures} request(s) failed; partial results retained`;
     } catch (e) {
       const persisted = find(run.id, "run");
       run.status = persisted.status === "ABORTED" ? "ABORTED" : "FAILED";
@@ -488,7 +594,7 @@ export function createApplication({
       const p = url.pathname;
       const method = req.method;
       if (p === "/api/health" && method === "GET") {
-        json(res, { ok: true, mode: "local", version: "0.1.0" });
+        json(res, { ok: true, mode: "local", version: "0.2.0" });
         return;
       }
       if (p === "/api/catalog" && method === "GET") {
@@ -544,10 +650,12 @@ export function createApplication({
         }
         if (runMatch[2] === "export" && method === "GET") {
           const format = url.searchParams.get("format") || "json";
-          if (!["json", "csv"].includes(format))
-            reject(400, "Export format must be json or csv");
+          if (!["json", "jsonl", "csv"].includes(format))
+            reject(400, "Export format must be json, jsonl or csv");
           let output;
           if (format === "json") output = JSON.stringify(run.results, null, 2);
+          else if (format === "jsonl")
+            output = run.results.map((r) => JSON.stringify(r)).join("\n");
           else {
             const keys = [...new Set(run.results.flatMap(Object.keys))];
             const cell = (v) => {
@@ -566,10 +674,11 @@ export function createApplication({
             ].join("\r\n");
           }
           res.writeHead(200, {
-            "Content-Type":
-              format === "json"
-                ? "application/json; charset=utf-8"
-                : "text/csv; charset=utf-8",
+            "Content-Type": {
+              json: "application/json; charset=utf-8",
+              jsonl: "application/x-ndjson; charset=utf-8",
+              csv: "text/csv; charset=utf-8",
+            }[format],
             "Content-Disposition": `attachment; filename="${run.id}.${format}"`,
           });
           res.end(output);
@@ -596,12 +705,12 @@ export function createApplication({
       if (p === "/api/tasks" && method === "POST") {
         const b = await body(req);
         capacity("task");
-        actorFor(b.actorId);
+        const actor = actorFor(b.actorId);
         const task = {
           id: randomUUID(),
           name: text(b.name, "Task name"),
           actorId: b.actorId,
-          input: inputValue(b.input),
+          input: validInput(actor, b.input),
           createdAt: now(),
         };
         save("task", task);
@@ -808,6 +917,7 @@ if (
   const app = createApplication({
     dataDirectory: process.env.LEEDS_DATA_DIR || path.resolve("data"),
     port: Number(process.env.PORT || 4181),
+    llm: readLlmConfig(process.env),
   });
   const address = await app.listen();
   console.log(`Leeds Harvester server: http://127.0.0.1:${address.port}`);
