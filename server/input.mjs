@@ -79,5 +79,7 @@ export function normalizeInput(actor, input) {
     if (!LOCAL_BUSINESS_CATEGORIES[out.category] && out.category !== "custom")
       fail("Business type is not supported");
   }
+  if (actor.id === "youtube-scraper" && !out.query && !out.urls?.length)
+    fail("Enter public YouTube video URLs or a search query");
   return out;
 }

@@ -84,5 +84,12 @@ Checked and rejected by the reviewers:
 - A real AI provider: AI extraction was tested only against a simulated OpenAI-compatible server.
 - The Overpass mirror (`overpass.kumi.systems`), which was unreachable during the outage when it was probed.
 - Vimeo oEmbed with a currently public video; Spotify and SoundCloud oEmbed.
-- Node 24.18.0 specifically (tests ran on Node 26.7.0), and mobile layouts after the 0.2 UI changes.
+- Node 24.18.0 specifically (tests ran on Node 26.7.0), and mobile views beyond the shared scraper Input/README workspace.
 - Load and long-running schedules, and sites other than those listed above.
+
+
+## Scraper workspace and independent platform collectors
+
+Final local gate: `npm test && npm run build && git diff --check` passed with **56 tests, 0 failures** on Node 26.7.0. REA CLI evidence checked all 22 scraper pages and their five shared tabs. CUA checked the Form/JSON round trip, malformed JSON blocking a run, README navigation preserving input, task creation displaying the configured target, and a 390 × 844 mobile view with document width 390. The temporary UI QA task was removed after the saved task and configured target were verified.
+
+The independent YouTube known-video URL path completed a live run with one record. Six social page samples failed because of robots restrictions or unavailable structured data; Maps/Search were not run without Google credentials. Their tests use controlled public-page/API fixtures and do not establish live availability. [Full evidence and limitations](scraper-workspace-validation.md).

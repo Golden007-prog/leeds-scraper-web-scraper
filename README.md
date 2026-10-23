@@ -196,3 +196,34 @@ Please follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report security vulnera
 ## Credits
 
 Designed and built by **Kritish Dhital**. The Leeds Harvester name and logo are original to this project. Several capabilities were inspired by studying other open-source scrapers; no code was copied. See [docs/capability-sources.md](docs/capability-sources.md).
+
+## Scraper workspace and independent platform collectors
+
+Every scraper has the same **Input, README, Output, Runs and API** screens. Input supports individual URL rows, bulk URL entry and an editable JSON view; the header can start a run or save the current configuration as a task. Each scraper's output fields and limits are documented from this implementation. The dataset view shows every returned field. This is Leeds Harvester's own code and design, informed by the public Apify interface; it does not call Apify Actors or recover their private backend.
+
+Nine additional collectors are included:
+
+| Scraper | Independent implementation | Current boundary |
+| --- | --- | --- |
+| TikTok Scraper | Known public page hydration and explicit metadata fallback | Sample public profile returned no supported data; access limited |
+| Instagram Scraper | Public JSON-LD and page metadata | Tested post blocked by robots.txt |
+| Instagram Profile Scraper | Public profile JSON-LD and page metadata | Tested profile blocked by robots.txt |
+| Instagram Reel Scraper | Public video JSON-LD and page metadata | Tested reel blocked by robots.txt; no media downloading |
+| Facebook Search Posts | Public keyword-search page and structured post records | Tested search blocked by robots.txt; no people/private-group collection |
+| TikTok Search Scraper | Public keyword-search page and embedded search records | Tested search blocked by robots.txt |
+| Google Maps Scraper | Google Places API (New) Text Search, up to 60 results | Requires an enabled API key and Google billing; paid requests not tested |
+| Google Search Results Scraper | Google Custom Search JSON API, up to 100 organic results | Existing eligible API customers only; API closes January 1, 2027; no ads/AI overviews |
+| YouTube Scraper | oEmbed for known videos; Data API for search and video/channel metrics | URL-only mode verified live; search/metrics require a key; no downloads or quota bypass |
+
+The six public-page collectors are labelled **Public access limited**, not verified live-working. Their parsers and workers pass controlled fixture tests; blocked/empty source pages produce a failed run with the actual reason. No cookies, account login, private endpoints, proxy evasion or CAPTCHA bypass are implemented. See [the REA and validation record](docs/scraper-workspace-validation.md).
+
+Optional independent Google API configuration (environment only; restart the server after setting):
+
+```sh
+export LEEDS_GOOGLE_MAPS_API_KEY='your-places-api-key'
+export LEEDS_GOOGLE_SEARCH_API_KEY='your-existing-custom-search-api-key'
+export LEEDS_GOOGLE_SEARCH_ENGINE_ID='your-search-engine-id'
+export LEEDS_YOUTUBE_API_KEY='your-youtube-data-api-key'
+```
+
+Missing Maps/Search configuration disables those Start buttons. YouTube URL mode needs none of these keys. These keys are never returned to the browser or stored in tasks/runs. Google APIs apply their own billing and quotas; no paid calls were made during this implementation. Google Search's eligibility and retirement are documented in [Google's API overview](https://developers.google.com/custom-search/v1/overview).

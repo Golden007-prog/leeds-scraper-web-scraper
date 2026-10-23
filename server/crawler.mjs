@@ -234,7 +234,10 @@ export async function fetchPublicResource(
       request.end(body);
     });
     if (response.redirect) {
-      u = validateUrl(new URL(response.redirect, u).href);
+      const next = validateUrl(new URL(response.redirect, u).href);
+      if (next.origin !== u.origin && Object.keys(headers).some((name) => /^(authorization|proxy-authorization|cookie|x-goog-api-key)$/i.test(name)))
+        throw new FetchError("Credential-bearing requests cannot redirect to another origin");
+      u = next;
       continue;
     }
     return response;
@@ -247,6 +250,7 @@ export async function fetchPublicJson(url, options = {}) {
     ...options,
     accept: ACCEPT.json,
   });
+  options.onBytes?.(response.bytes);
   try {
     return JSON.parse(response.body);
   } catch {

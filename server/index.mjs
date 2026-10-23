@@ -15,6 +15,8 @@ import {
 import { extractHtml, extractFeed, pageMarkdown } from "./extractors.mjs";
 import { normalizeInput, InputError } from "./input.mjs";
 import { createFetchSession, RobotsBlocked } from "./session.mjs";
+import { runPublicPlatform } from "./platforms.mjs";
+import { createGoogleSourceRunners } from "./google-sources.mjs";
 import {
   runLocalBusinessLeads,
   runSocialEmbeds,
@@ -119,11 +121,16 @@ export function createApplication({
   fetchPage = fetchPublicResource,
   fetchJson = fetchPublicJson,
   llm = null,
+  googleSources = {},
   timing = { politenessMs: 500, retryBaseMs: 1000 },
   maxRuns = MAX_RUNS,
   hostnames = appHostnames(),
 } = {}) {
-  const actors = buildCatalog({ llmConfigured: Boolean(llm) });
+  const actors = buildCatalog({
+    llmConfigured: Boolean(llm),
+    googleMapsConfigured: Boolean(googleSources.googleMapsKey),
+    googleSearchConfigured: Boolean(googleSources.googleSearchKey && googleSources.googleSearchEngineId),
+  });
   mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(path.join(dataDirectory, "leeds.sqlite"));
   db.exec(
@@ -202,7 +209,7 @@ export function createApplication({
   const actorFor = (id) => {
     const actor = actors.find((a) => a.id === id);
     if (!actor) reject(400, "Unknown Actor");
-    if (actor.status !== "ready")
+    if (!["ready", "access-limited"].includes(actor.status))
       reject(409, actor.notice || "This Actor requires a provider and cannot run");
     return actor;
   };
@@ -379,6 +386,8 @@ export function createApplication({
   const sourceRunners = {
     "local-business-leads": runLocalBusinessLeads,
     "social-embeds": runSocialEmbeds,
+    ...createGoogleSourceRunners(googleSources),
+    ...Object.fromEntries(["tiktok-scraper", "instagram-scraper", "instagram-profile", "instagram-reel", "facebook-search-posts", "tiktok-search"].map((id) => [id, runPublicPlatform])),
   };
   async function execute(id, controller) {
     const run = find(id, "run");
@@ -429,24 +438,50 @@ export function createApplication({
         });
         return (url, options = {}) => get(url, { maxBytes: PAGE_BYTES, ...options });
       };
+      const get = session(signal);
+      const remainingBytes = () => {
+        if (budget.bytes >= RUN_BYTES) {
+          budget.stop = "download";
+          throw Object.assign(new Error("Run download budget reached; partial results retained"), { code: "LEEDS_RUN_DOWNLOAD_LIMIT" });
+        }
+        return RUN_BYTES - budget.bytes;
+      };
+      const chargeBytes = (bytes) => {
+        budget.bytes += bytes;
+      };
       const ctx = {
+        actorId: actor.id,
         input: run.input,
         signal,
         budget,
         push,
         session,
-        get: session(signal),
+        get,
+        getPage: async (url, options = {}) => {
+          const page = await get(url, { ...options, maxBytes: Math.min(options.maxBytes ?? PAGE_BYTES, remainingBytes()) });
+          chargeBytes(page.bytes ?? Buffer.byteLength(page.body));
+          return page;
+        },
         // Persists progress so collected records are visible while a source
         // is still working.
         checkpoint: () => save("run", run),
         log: (message) => log(run, message),
         timeLeft: () => deadlineMs - (Date.now() - started),
-        fetchJson: (url, options = {}) => fetchJson(url, { ...options, signal }),
+        fetchJson: async (url, options = {}) => {
+          let measured = false;
+          const data = await fetchJson(url, {
+            ...options, signal, maxBytes: Math.min(options.maxBytes ?? 5 * 1024 * 1024, remainingBytes()),
+            onBytes: (bytes) => { measured = true; chargeBytes(bytes); },
+          });
+          if (!measured) chargeBytes(Buffer.byteLength(JSON.stringify(data)));
+          return data;
+        },
       };
       const { failures = 0 } =
         actor.mode === "source"
           ? await sourceRunners[actor.id](ctx)
           : await crawl(run, actor, ctx);
+      if (budget.bytes >= RUN_BYTES) budget.stop ??= "download";
       if (budget.stop)
         log(run, `Stopped at the ${budget.stop} limit; results kept`);
       run.status = failures ? "FAILED" : "SUCCEEDED";
@@ -912,6 +947,12 @@ if (
     dataDirectory: process.env.LEEDS_DATA_DIR || path.resolve("data"),
     port: Number(process.env.PORT || 4181),
     llm: readLlmConfig(process.env),
+    googleSources: {
+      googleMapsKey: process.env.LEEDS_GOOGLE_MAPS_API_KEY,
+      googleSearchKey: process.env.LEEDS_GOOGLE_SEARCH_API_KEY,
+      googleSearchEngineId: process.env.LEEDS_GOOGLE_SEARCH_ENGINE_ID,
+      youtubeKey: process.env.LEEDS_YOUTUBE_API_KEY,
+    },
   });
   const address = await app.listen();
   console.log(`Leeds Harvester server: http://127.0.0.1:${address.port}`);

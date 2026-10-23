@@ -13,11 +13,11 @@ Leeds Harvester is a single-workspace web data collector for one machine. It has
 
 ## Outgoing requests
 
-- Page fetches, feeds, `robots.txt`, OpenStreetMap and oEmbed requests all go through one guard, `fetchPublicResource`. The only exception is the AI endpoint, which the operator configures through environment variables.
+- Page fetches, feeds, `robots.txt`, OpenStreetMap, Google APIs and oEmbed requests all go through one guard, `fetchPublicResource`. The only exception is the AI endpoint, which the operator configures through environment variables.
 - URL parsing rejects embedded credentials, unsupported schemes and nonstandard ports.
 - Only public IPv4 addresses are accepted. Every DNS answer is checked, and the connection uses the address that was checked. Every redirect is parsed and validated again.
 - Each request has its own socket. Unused error and redirect bodies are discarded by closing that socket rather than being downloaded. IPv6-only sites are unsupported.
-- POST requests (only the Overpass query) never follow redirects.
+- POST requests (Overpass and Google Places queries) never follow redirects. Credential-bearing GET requests (Authorization, Cookie, Proxy-Authorization or X-Goog-Api-Key headers) refuse cross-origin redirects.
 - HTML and XML are parsed as data and scripts are never run. Email matching uses bounded patterns, and `robots.txt` wildcards are matched without regular expressions, so hostile input can't cause runaway matching time.
 
 ## Politeness
@@ -27,7 +27,7 @@ Leeds Harvester is a single-workspace web data collector for one machine. It has
   - A server error or an unreachable `robots.txt` means the site is skipped.
   - `robots.txt` is read whatever content type the server labels it with.
 - Redirects are followed inside the fetcher, and the page finally served is checked against its own site's rules. A disallowed redirect target is discarded.
-- Users can turn this off per run, and the UI warns them to do so only with permission.
+- Public-platform page collectors always enforce robots.txt. Other page collectors can turn this off per run, and the UI warns them to do so only with permission.
 - Requests to the same host are at least 0.5 s apart, and longer when the site's `Crawl-delay` asks (honoured up to 10 s).
 - Throttling (408, 429) and temporary server or network errors are retried at most twice, with backoff of up to 5 s that honours `Retry-After`.
 - OpenStreetMap services get one geocoding request and one Overpass query per run, with an identifying User-Agent, in line with their usage policies.
@@ -66,3 +66,9 @@ The AI API key comes from the environment. It is sent only to the configured end
 ## Output
 
 React renders extracted content as text. JSON and CSV exports keep source fields, and CSV neutralizes spreadsheet formula prefixes. Source URLs are kept as local evidence and are not treated as secrets. Avoid putting credentials in URLs: authenticated crawling is unsupported.
+
+## Independent platform collectors
+
+The new platform collectors do not call Apify or execute imported scraper code. Public HTML parsers accept only declared platform hosts and supported public paths and validate the final URL after redirects. Known login/challenge pages and unsupported/empty public data fail; scripts are parsed as inert data with size/depth limits. Search collectors request visible public search pages, never authenticated or hidden endpoints. No proxy evasion or cookie reuse is available.
+
+Google service keys are read from environment variables at startup, used only in fixed-endpoint request headers and kept out of persisted run inputs, logs and catalog responses. Google request errors omit upstream response bodies/URLs that could disclose credentials. Maps and Custom Search remain disabled until the corresponding configuration is supplied. API integration was tested using injected fixtures; no paid requests were executed. YouTube known-URL oEmbed uses no API key.
